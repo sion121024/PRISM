@@ -83,22 +83,19 @@ class PRISMCell(nn.Module):
         K: int = 8,
         step: float = 0.1,
         adaptive: bool = False,
+        tol: float = 1e-4,
     ) -> tuple[torch.Tensor, list[float]]:
         """
-        Run K inner-clock steps.  Returns final x and energy trace.
-        If adaptive=True, use learned halting (ACT-style).
+        Run up to K inner-clock steps.  Returns final x and energy trace.
+        adaptive=True: stop early when |ΔE| < tol (energy converged).
         """
         energies = []
         for _ in range(K):
             g = self.grad_E(x, u)
             x = x - step * g
             energies.append(self.energy(x, u).mean().item())
-            if adaptive:
-                delta = torch.tensor([[energies[-2] - energies[-1]]]
-                                     if len(energies) > 1 else [[1.0]],
-                                     device=x.device)
-                p_halt = torch.sigmoid(self.halt_net(delta))
-                if p_halt.item() > 0.9:
+            if adaptive and len(energies) > 1:
+                if abs(energies[-1] - energies[-2]) < tol:
                     break
         return x, energies
 
