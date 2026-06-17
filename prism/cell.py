@@ -120,7 +120,8 @@ class PRISMCell(nn.Module):
         state_norm: Optional[bool] = None,
         mem_scale: float = 1.0,
         use_prior: bool = False,
-        simple_prior: bool = False,  # True → μ = x_prev (파라미터 없는 identity prior)
+        simple_prior: bool = False,  # True → μ = x_prev (identity prior)
+        prior_bias: bool = False,    # True → μ = x_prev + b (d params, 빠른 수렴)
     ):
         super().__init__()
         assert memory_mode in ("sliding", "full_M", "none")
@@ -162,9 +163,11 @@ class PRISMCell(nn.Module):
         self.log_pi2 = nn.Parameter(torch.zeros(d))
 
         # Prior 항: ½‖x − μ(x_prev)‖²_Π3
-        # simple_prior=True: μ = x_prev (identity, 파라미터 없음) ← 단순하고 빠름
-        # use_prior=True:    μ = MLP(x_prev) (학습, +18K params)  ← 더 표현력 있음
+        # simple_prior=True:               μ = x_prev           (0 params)
+        # simple_prior + prior_bias=True:  μ = x_prev + b       (d params) ← 빠른 수렴
+        # use_prior=True:                  μ = MLP(x_prev)      (+18K params)
         self.simple_prior = simple_prior
+        self.has_prior_bias = prior_bias and simple_prior
         if use_prior and not simple_prior:
             self.prior_mu = nn.Sequential(
                 nn.Linear(d, d // 4),
@@ -173,6 +176,8 @@ class PRISMCell(nn.Module):
             )
         if use_prior or simple_prior:
             self.log_pi3 = nn.Parameter(torch.zeros(d))
+        if self.has_prior_bias:
+            self.prior_b = nn.Parameter(torch.zeros(d))
 
         # 초기 상태 인코더
         self.x_init = nn.Linear(emb_dim, d)
@@ -285,9 +290,11 @@ class PRISMCell(nn.Module):
             grad_mem = x.new_zeros(x.shape)
 
         # Prior 항: −Π3(x − μ)
+        # simple_prior + prior_bias: μ = x_prior + b (빠른 수렴)
         if (self.use_prior or self.simple_prior) and x_prior is not None:
             pi3 = _pi3 if _pi3 is not None else self.pi3
-            grad_prior = pi3 * (x_prior - x)
+            mu = x_prior + self.prior_b if self.has_prior_bias else x_prior
+            grad_prior = pi3 * (mu - x)
         else:
             grad_prior = x.new_zeros(x.shape)
 
@@ -311,7 +318,8 @@ class PRISMCell(nn.Module):
             e_mem = x.new_zeros(x.shape[0])
 
         if (self.use_prior or self.simple_prior) and x_prior is not None:
-            eps_p = x - x_prior
+            mu = x_prior + self.prior_b if self.has_prior_bias else x_prior
+            eps_p = x - mu
             e_prior = 0.5 * (eps_p ** 2 * self.pi3).sum(-1)
         else:
             e_prior = x.new_zeros(x.shape[0])

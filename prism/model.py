@@ -50,6 +50,7 @@ class PRISMLangModel(nn.Module):
         use_prior: bool = False,
         use_urec: bool = True,
         simple_prior: bool = False,
+        prior_bias: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -74,6 +75,7 @@ class PRISMLangModel(nn.Module):
             state_norm=state_norm,
             use_prior=use_prior,
             simple_prior=simple_prior,
+            prior_bias=prior_bias,
         )
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
