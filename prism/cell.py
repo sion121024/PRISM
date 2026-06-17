@@ -295,37 +295,36 @@ class PRISMCell(nn.Module):
             energies: List[float] = []
             with torch.no_grad():
                 for _ in range(K):
-                    energies.append(self.energy(self._rms(x), u, mem_state).item())
-                    x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
-                energies.append(self.energy(self._rms(x), u, mem_state).item())
-            return self._rms(x), energies
+                    energies.append(self.energy(x, u, mem_state).item())
+                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+                energies.append(self.energy(x, u, mem_state).item())
+            return x, energies
 
         if training and self.approximate_grad:
             with torch.no_grad():
                 for _ in range(K - 1):
-                    x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
+                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
             x = x.detach()
-            x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
-            return self._rms(x)
+            x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+            return x
 
         # 적응형 K (추론 전용): 에너지 수렴 시 조기 종료
         if adaptive and not training:
             with torch.no_grad():
                 prev_e = float('inf')
                 for k in range(K):
-                    x_n = self._rms(x)
-                    e = self.energy(x_n, u, mem_state).item()
+                    e = self.energy(x, u, mem_state).item()
                     if k >= K_min and abs(prev_e - e) / (abs(prev_e) + 1e-8) < K_tol:
                         break
                     prev_e = e
-                    x = x + self.alpha * self._neg_grad_E(x_n, u, mem_state)
-            return self._rms(x)
+                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+            return x
 
-        # Full backprop (기본)
+        # Full backprop (기본) — raw x 공간에서 정확한 에너지 경사하강
         with torch.set_grad_enabled(training):
             for _ in range(K):
-                x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
-        return self._rms(x)
+                x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+        return x
 
     def _rms(self, x: torch.Tensor) -> torch.Tensor:
         """

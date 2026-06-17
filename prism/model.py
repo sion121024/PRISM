@@ -143,8 +143,13 @@ class PRISMLangModel(nn.Module):
                 x = x_star
             else:
                 x, mem = self.cell(u, mem, x, training=is_training)
-                if self.carry_nonlin:  # 하위호환용, 신규 코드에선 u_recurrent가 담당
+                if self.carry_nonlin:  # 하위호환용 (설계 비정합)
                     x = self.carry_ln(x + self.carry_gate(x))
+                else:
+                    # 토큰 간 상태 정규화 (파라미터 없음, 표현 스케일 고정)
+                    # carry gate의 LN 역할을 설계 정합적으로 수행
+                    rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+                    x = x * rms
 
             all_x.append(x)
 
@@ -188,6 +193,8 @@ class PRISMLangModel(nn.Module):
             u = self.u_recurrent(torch.cat([u_raw, x], dim=-1))
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False)
             mem = self.cell.update_memory(x, mem)
+            rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+            x = x * rms
 
         generated = prompt.tolist()
         for _ in range(max_new_tokens):
@@ -203,6 +210,8 @@ class PRISMLangModel(nn.Module):
             u = self.u_recurrent(torch.cat([u_raw, x], dim=-1))
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False)
             mem = self.cell.update_memory(x, mem)
+            rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+            x = x * rms
 
         return torch.tensor(generated, device=device)
 

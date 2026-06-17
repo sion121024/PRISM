@@ -82,7 +82,7 @@ def make_urec(vocab_size, d, emb_dim, K, alpha, mem_rank=32, mem_scale=4.0):
         mem_rank=mem_rank, mem_scale=mem_scale,
         decoder="mlp", dec_hidden=64,
         carry_nonlin=False,
-        state_norm=True,
+        state_norm=False,  # K-루프 내 정규화 없음 (에너지 단조감소 보장)
     )
 
 
