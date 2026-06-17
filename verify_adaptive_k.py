@@ -42,9 +42,18 @@ def measure_adaptive_k(model, val_loader, device, K_max=8, K_tol=1e-4, K_min=1):
 
             for t in range(T - 1):
                 u_raw = u_all[:, t]
-                u = u_raw  # use_urec=False
+                if model.use_urec:
+                    u = model.u_rec2(F.gelu(model.u_rec1(
+                        torch.cat([u_raw, x], dim=-1))))
+                else:
+                    u = u_raw
 
-                x_prior = cell.prior_mu(x) if model.use_prior else None
+                if model.simple_prior:
+                    x_prior = x
+                elif model.use_prior:
+                    x_prior = cell.prior_mu(x)
+                else:
+                    x_prior = None
 
                 # 적응형 K: 에너지 수렴 추적
                 prev_e = float('inf')
@@ -102,10 +111,9 @@ def main():
     model = PRISMLangModel(
         vocab_size=vocab_size, d=args.d, emb_dim=args.emb_dim,
         K=args.K_max, alpha=args.alpha, memory_mode="sliding",
-        mem_rank=16, mem_scale=4.0,
-        decoder="mlp", dec_hidden=44,
-        carry_nonlin=False, state_norm=False,
-        use_prior=True, use_urec=False,
+        mem_rank=24, mem_scale=4.0,
+        decoder="mlp", dec_hidden=max(16, args.d // 4),
+        simple_prior=True, use_urec=True,
     ).to(device)
     print(f"  params: {model.num_params():,}")
 
