@@ -26,50 +26,59 @@ from typing import Optional, Tuple, List, Union
 
 class SlidingMemory:
     """
-    rank-r 슬라이딩 윈도우 연상기억.
-    M x_q ≈ Σ_i w_i (k_i · x_q) k_i   (단위 키, 대칭 PSD → 유계)
+    설계 원본 Hebbian ΔM = η(εmem ⊗ x) − γM 의 저랭크 근사.
 
-    순수 텐서 상태 [B, rank, d]: slot 0 = newest, slot rank-1 = oldest.
-    Python int 필드(ptr, filled) 제거 → torch.compile 호환.
-    빈 슬롯(zeros)은 dot=0이므로 filled 체크 불필요.
+    M x_q   = Σ_i w_i (x̂_i · x_q) ê_i      [apply   — 키=x̂, 값=ê]
+    Mᵀ v_q  = Σ_i w_i (ê_i · v_q) x̂_i       [apply_T — 키=ê, 값=x̂]
+
+    x̂ = normalize(x),  ê = normalize(εmem)
+    이전 대칭 Hopfield와 달리 비대칭(key≠value) → 오류신호 기반 연상기억.
+
+    상태: (x_buf [B,r,d], e_buf [B,r,d])  ← 순수 텐서, torch.compile 호환
+    slot 0 = newest, slot rank-1 = oldest
     """
 
     def __init__(self, d: int, rank: int, gamma: float, scale: float = 1.0):
         self.d = d
         self.rank = rank
         self.decay = 1.0 - gamma
-        # scale/rank → spectral_norm(M) ≈ scale (rank 독립, α 안정성 보장)
-        self.scale = scale / rank
+        self.scale = scale / rank  # spectral_norm(M) ≈ scale
 
-    def init(self, B: int, device: torch.device) -> torch.Tensor:
-        return torch.zeros(B, self.rank, self.d, device=device)
+    def _w(self, device: torch.device) -> torch.Tensor:
+        return (self.decay ** torch.arange(self.rank, device=device).float()).unsqueeze(0)
 
-    def apply(self, x_q: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
-        """
-        M x_q = Σ_i w_i (k_i·x_q) · k_i
-        slot 0=newest weight=1, slot i weight=decay^i.
-        빈 슬롯(zeros)은 dot=0 → 자동으로 기여 없음.
-        """
-        w = (self.decay ** torch.arange(self.rank, device=x_q.device).float()).unsqueeze(0)  # [1, r]
-        dots = (state * x_q.unsqueeze(1)).sum(-1) * w * self.scale  # [B, r]
-        return (dots.unsqueeze(-1) * state).sum(1)                   # [B, d]
+    def init(self, B: int, device: torch.device):
+        z = torch.zeros(B, self.rank, self.d, device=device)
+        return (z, z.clone())  # (x_buf, e_buf)
 
-    def apply_T(self, x_q: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
-        """대칭 메모리: apply_T == apply."""
-        return self.apply(x_q, state)
+    def apply(self, x_q: torch.Tensor, state) -> torch.Tensor:
+        """M x_q = Σ_i w_i (x̂_i · x_q) ê_i"""
+        x_buf, e_buf = state
+        dots = (x_buf * x_q.unsqueeze(1)).sum(-1) * self._w(x_q.device) * self.scale
+        return (dots.unsqueeze(-1) * e_buf).sum(1)
+
+    def apply_T(self, v_q: torch.Tensor, state) -> torch.Tensor:
+        """Mᵀ v_q = Σ_i w_i (ê_i · v_q) x̂_i"""
+        x_buf, e_buf = state
+        dots = (e_buf * v_q.unsqueeze(1)).sum(-1) * self._w(v_q.device) * self.scale
+        return (dots.unsqueeze(-1) * x_buf).sum(1)
 
     @torch.no_grad()
-    def update(self, x_new: torch.Tensor, eps_new: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
-        """
-        새 키를 slot 0 에 삽입하고 기존 항목을 한 칸씩 밀어내는 shift.
-        eps_new 는 API 호환성을 위해 받지만 사용하지 않음.
-        """
-        k = x_new.detach()
-        k = k / k.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        new_state = torch.empty_like(state)
-        new_state[:, 0, :] = k                  # newest in slot 0
-        new_state[:, 1:, :] = state[:, :-1, :]  # shift older entries down
-        return new_state
+    def update(self, x_new: torch.Tensor, eps_new: torch.Tensor, state) -> tuple:
+        """(x̂_new, ê_new) 쌍을 slot 0에 삽입, 이전 항목 한 칸 밀어냄."""
+        x_buf, e_buf = state
+        xk = x_new.detach()
+        xk = xk / xk.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        ek = eps_new.detach()
+        ek = ek / ek.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+        new_x = torch.empty_like(x_buf)
+        new_e = torch.empty_like(e_buf)
+        new_x[:, 0, :] = xk
+        new_x[:, 1:, :] = x_buf[:, :-1, :]
+        new_e[:, 0, :] = ek
+        new_e[:, 1:, :] = e_buf[:, :-1, :]
+        return (new_x, new_e)
 
 
 # ------------------------------------------------------------------ #
