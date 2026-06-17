@@ -170,8 +170,8 @@ class PRISMCell(nn.Module):
         # 초기 상태 인코더
         self.x_init = nn.Linear(emb_dim, d)
 
-        # 상태 정규화 게인 (RMSNorm scale)
-        self.norm_gain = nn.Parameter(torch.ones(d))
+        if state_norm:
+            self.norm_gain = nn.Parameter(torch.ones(d))
 
         self._init_weights()
 
