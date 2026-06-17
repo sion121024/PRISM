@@ -1,15 +1,17 @@
 """
-Stage 2: PRISM vs LSTM 문자 LM perplexity 비교.
+Stage 3 Ablation: 방향 1+3 검증.
 
-공정한 비교 원칙:
-  - 동일 데이터 (shared vocab train/val split)
-  - 파라미터 예산 매칭 (~55K)
-  - 동일 학습 설정 (lr, epochs, batch)
+  방향 1: 메모리 강화 (scale 1/√d → 1.0, rank 16 → 32)
+  방향 3: carry gate — 토큰 사이 비선형 상태 전이
 
-PRISM의 논지는 "적은 파라미터로 경쟁"이므로 파라미터를 맞추고 ppl을 본다.
+비교 구성:
+  A. baseline    — linear, mem_scale=1/√d=0.0625, rank=16, no carry  (=Stage2 원본)
+  B. mem_boost   — linear, mem_scale=1.0, rank=32, no carry          (방향 1)
+  C. mem+carry   — linear, mem_scale=1.0, rank=32, carry_nonlin      (방향 1+3)
+  LSTM           — param-matched baseline
 
 실행:
-  python stage2_compare.py --epochs 15 --block_size 64
+  python stage3_ablation.py --epochs 5 --block_size 64
 """
 
 import argparse
@@ -26,7 +28,7 @@ from tasks import TinyShakespeare
 from baselines import LSTMLangModel
 
 
-def train_one(model, train_loader, val_loader, vocab_size, args, name, tbptt):
+def train_one(model, train_loader, val_loader, args, name):
     device = torch.device(args.device)
     model = model.to(device)
     n_params = model.num_params()
@@ -42,8 +44,7 @@ def train_one(model, train_loader, val_loader, vocab_size, args, name, tbptt):
         t0 = time.time()
         for tokens in train_loader:
             tokens = tokens.to(device)
-            out = model(tokens, tbptt_window=tbptt) if tbptt is not None \
-                else model(tokens)
+            out = model(tokens)
             opt.zero_grad()
             out["loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -68,67 +69,70 @@ def train_one(model, train_loader, val_loader, vocab_size, args, name, tbptt):
     return best_ppl, n_params
 
 
+def make_prism(vocab_size, d, emb_dim, K, alpha, mem_rank, mem_scale, carry_nonlin):
+    return PRISMLangModel(
+        vocab_size=vocab_size, d=d, emb_dim=emb_dim,
+        K=K, alpha=alpha, memory_mode="sliding",
+        mem_rank=mem_rank, mem_scale=mem_scale,
+        decoder="linear", carry_nonlin=carry_nonlin,
+    )
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=15)
+    p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--block_size", type=int, default=64)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--device", default="cpu")
-    # PRISM
     p.add_argument("--d", type=int, default=256)
     p.add_argument("--emb_dim", type=int, default=64)
     p.add_argument("--K", type=int, default=2)
     p.add_argument("--alpha", type=float, default=0.05)
-    p.add_argument("--mem_rank", type=int, default=32)
-    p.add_argument("--mem_scale", type=float, default=1.0)
-    p.add_argument("--carry_nonlin", action="store_true", default=False)
-    p.add_argument("--tbptt", type=int, default=0)
-    p.add_argument("--decoder", choices=["linear", "mlp"], default="linear")
-    p.add_argument("--dec_hidden", type=int, default=64)
-    p.add_argument("--skip_lstm", action="store_true", default=False)
-    # LSTM (param-matched)
     p.add_argument("--lstm_hidden", type=int, default=80)
-    p.add_argument("--lstm_layers", type=int, default=1)
+    p.add_argument("--skip_lstm", action="store_true")
     args = p.parse_args()
 
     train_ds = TinyShakespeare(block_size=args.block_size, split="train")
-    val_ds = TinyShakespeare(block_size=args.block_size, split="val")
+    val_ds   = TinyShakespeare(block_size=args.block_size, split="val")
     vocab_size = train_ds.vocab_size
     train_loader = train_ds.get_loader(batch_size=args.batch_size)
-    val_loader = val_ds.get_loader(batch_size=args.batch_size, shuffle=False)
+    val_loader   = val_ds.get_loader(batch_size=args.batch_size, shuffle=False)
     print(f"vocab={vocab_size} | train={len(train_ds)} val={len(val_ds)} chunks"
           f" | block_size={args.block_size}")
 
-    results = {}
+    OLD_SCALE = 1.0 / (args.d ** 0.5)  # =0.0625 for d=256
 
-    suffix = args.decoder
-    if args.carry_nonlin:
-        suffix += "+carry"
-    pname = f"PRISM-{suffix}"
-    prism = PRISMLangModel(
-        vocab_size=vocab_size, d=args.d, emb_dim=args.emb_dim,
-        K=args.K, alpha=args.alpha, memory_mode="sliding",
-        mem_rank=args.mem_rank, mem_scale=args.mem_scale,
-        decoder=args.decoder, dec_hidden=args.dec_hidden,
-        carry_nonlin=args.carry_nonlin,
-    )
-    results[pname] = train_one(
-        prism, train_loader, val_loader, vocab_size, args, pname, args.tbptt)
+    configs = [
+        # name,             mem_scale,  mem_rank, carry_nonlin
+        ("A-baseline",      OLD_SCALE,  16,       False),
+        ("B-mem_boost",     1.0,        32,       False),
+        ("C-mem+carry",     1.0,        32,       True),
+    ]
+
+    results = {}
+    for name, mem_scale, mem_rank, carry_nonlin in configs:
+        model = make_prism(
+            vocab_size, args.d, args.emb_dim, args.K, args.alpha,
+            mem_rank, mem_scale, carry_nonlin,
+        )
+        results[name] = train_one(model, train_loader, val_loader, args, name)
 
     if not args.skip_lstm:
         lstm = LSTMLangModel(
             vocab_size=vocab_size, emb_dim=args.emb_dim,
-            hidden_dim=args.lstm_hidden, n_layers=args.lstm_layers,
+            hidden_dim=args.lstm_hidden, n_layers=1,
         )
-        results["LSTM"] = train_one(
-            lstm, train_loader, val_loader, vocab_size, args, "LSTM", None)
+        results["LSTM"] = train_one(lstm, train_loader, val_loader, args, "LSTM")
 
-    print("\n" + "=" * 50)
-    print("Stage 2 결과 (낮을수록 좋음)")
-    print("=" * 50)
+    print("\n" + "=" * 56)
+    print("Stage 3 Ablation 결과 (낮을수록 좋음)")
+    print("=" * 56)
     for name, (ppl, n) in results.items():
-        print(f"  {name:6s}: val_ppl {ppl:.3f}  ({n:,} params)")
+        print(f"  {name:<16s}: val_ppl {ppl:.3f}  ({n:,} params)")
+    print()
+    print("방향 1 효과: A vs B (메모리 강화)")
+    print("방향 3 효과: B vs C (carry gate 추가)")
 
 
 if __name__ == "__main__":

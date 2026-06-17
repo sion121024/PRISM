@@ -31,11 +31,11 @@ class SlidingMemory:
     원형 버퍼 + mul+sum (einsum 없음, clone 최소화)
     """
 
-    def __init__(self, d: int, rank: int, gamma: float):
+    def __init__(self, d: int, rank: int, gamma: float, scale: float = 1.0):
         self.d = d
         self.rank = rank
         self.decay = 1.0 - gamma
-        self.scale = 1.0 / (d ** 0.5)   # 1/√d — 어텐션식 스케일, 유계 보장
+        self.scale = scale  # 메모리 검색 스케일 (1/√d → 너무 약했음, 기본 1.0)
 
     def init(self, B: int, device: torch.device) -> dict:
         return {
@@ -120,6 +120,7 @@ class PRISMCell(nn.Module):
         decoder: str = "linear",
         dec_hidden: int = 128,
         state_norm: Optional[bool] = None,
+        mem_scale: float = 1.0,
     ):
         super().__init__()
         assert memory_mode in ("sliding", "full_M", "none")
@@ -141,7 +142,7 @@ class PRISMCell(nn.Module):
         self.dec_hidden = dec_hidden
 
         if memory_mode == "sliding":
-            self.sliding = SlidingMemory(d, mem_rank, mem_gamma)
+            self.sliding = SlidingMemory(d, mem_rank, mem_gamma, scale=mem_scale)
 
         # 느린가중치 θ — 생성모델 g: ℝ^d → ℝ^emb
         #   linear: g(x) = D x          → E 가 2차식 (사고가 자명)

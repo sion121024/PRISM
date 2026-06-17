@@ -43,6 +43,8 @@ class PRISMLangModel(nn.Module):
         approximate_grad: bool = False,
         decoder: str = "linear",
         dec_hidden: int = 128,
+        mem_scale: float = 1.0,
+        carry_nonlin: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -60,8 +62,19 @@ class PRISMLangModel(nn.Module):
             approximate_grad=approximate_grad,
             decoder=decoder,
             dec_hidden=dec_hidden,
+            mem_scale=mem_scale,
         )
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
+
+        self.carry_nonlin = carry_nonlin
+        if carry_nonlin:
+            # nonlinear state carry between tokens (direction 3)
+            self.carry_gate = nn.Sequential(
+                nn.Linear(d, d // 4),
+                nn.GELU(),
+                nn.Linear(d // 4, d),
+            )
+            self.carry_ln = nn.LayerNorm(d)
 
         if use_deq:
             self.deq = DEQSolver()
@@ -120,6 +133,8 @@ class PRISMLangModel(nn.Module):
                 x = x_star
             else:
                 x, mem = self.cell(u, mem, x, training=is_training)
+                if self.carry_nonlin:
+                    x = self.carry_ln(x + self.carry_gate(x))
 
             all_x.append(x)
 
