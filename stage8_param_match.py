@@ -68,7 +68,8 @@ def train_one(model, train_loader, val_loader, args, name):
 
 
 def make_prism_matched(vocab_size, d, emb_dim, K, alpha, dec_hidden, mem_rank=16, mem_scale=4.0):
-    """파라미터 매칭 PRISM: carry gate 없음, prior 항, u_rec 없음 (~54K)."""
+    """파라미터 매칭 PRISM: carry gate 없음, prior 항, u_rec 포함 (~55K).
+    d=136, dec_hidden=34 → 55,452 params ≈ LSTM 56,080"""
     return PRISMLangModel(
         vocab_size=vocab_size, d=d, emb_dim=emb_dim,
         K=K, alpha=alpha, memory_mode="sliding",
@@ -77,7 +78,7 @@ def make_prism_matched(vocab_size, d, emb_dim, K, alpha, dec_hidden, mem_rank=16
         carry_nonlin=False,
         state_norm=False,
         use_prior=True,
-        use_urec=False,
+        use_urec=True,
     )
 
 
@@ -88,9 +89,9 @@ def main():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--device", default="cpu")
-    p.add_argument("--d", type=int, default=176)
+    p.add_argument("--d", type=int, default=136)
     p.add_argument("--emb_dim", type=int, default=64)
-    p.add_argument("--dec_hidden", type=int, default=44)
+    p.add_argument("--dec_hidden", type=int, default=34)
     p.add_argument("--alpha", type=float, default=0.05)
     p.add_argument("--lstm_hidden", type=int, default=80)
     p.add_argument("--skip_lstm", action="store_true")
