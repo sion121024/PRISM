@@ -296,7 +296,7 @@ class PRISMCell(nn.Module):
         else:
             e_mem = x.new_zeros(x.shape[0])
 
-        if self.use_prior and x_prior is not None:
+        if (self.use_prior or self.simple_prior) and x_prior is not None:
             eps_p = x - x_prior
             e_prior = 0.5 * (eps_p ** 2 * self.pi3).sum(-1)
         else:
