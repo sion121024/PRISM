@@ -101,13 +101,13 @@ def main():
     print(f"vocab={vocab_size} | train={len(train_ds)} val={len(val_ds)} chunks"
           f" | block_size={args.block_size}")
 
-    OLD_SCALE = 1.0 / (args.d ** 0.5)  # =0.0625 for d=256
-
+    # mem_scale = spectral_norm(M) 근사 (SlidingMemory.scale = mem_scale/rank)
+    # 안정성 조건: alpha*(1+mem_scale)²*pi2_max < 2  →  mem_scale < 6.6 (alpha=0.05)
     configs = [
         # name,             mem_scale,  mem_rank, carry_nonlin
-        ("A-baseline",      OLD_SCALE,  16,       False),
-        ("B-mem_boost",     1.0,        32,       False),
-        ("C-mem+carry",     1.0,        32,       True),
+        ("A-baseline",      1.0,        16,       False),   # 구 기본값 재현
+        ("B-mem_boost",     4.0,        32,       False),   # 방향 1: 4× 메모리 강화
+        ("C-mem+carry",     4.0,        32,       True),    # 방향 1+3: carry gate 추가
     ]
 
     results = {}

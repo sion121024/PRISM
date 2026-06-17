@@ -35,7 +35,8 @@ class SlidingMemory:
         self.d = d
         self.rank = rank
         self.decay = 1.0 - gamma
-        self.scale = scale  # 메모리 검색 스케일 (1/√d → 너무 약했음, 기본 1.0)
+        # scale/rank → spectral_norm(M) ≈ scale (rank 독립, α 안정성 보장)
+        self.scale = scale / rank
 
     def init(self, B: int, device: torch.device) -> dict:
         return {

@@ -80,7 +80,7 @@ def main():
     p.add_argument("--emb_dim", type=int, default=64)
     p.add_argument("--K", type=int, default=2)
     p.add_argument("--alpha", type=float, default=0.05)
-    p.add_argument("--mem_rank", type=int, default=32)
+    p.add_argument("--mem_rank", type=int, default=16)
     p.add_argument("--mem_scale", type=float, default=1.0)
     p.add_argument("--carry_nonlin", action="store_true", default=False)
     p.add_argument("--tbptt", type=int, default=0)
