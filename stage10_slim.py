@@ -99,21 +99,22 @@ def main():
     )
     results["PRISM-v1-K4"] = train_one(v1, train_loader, val_loader, args, "PRISM-v1-K4")
 
-    # slim K=2: 단순화 (no urec, identity prior, 절약된 params → d↑ rank↑)
+    # slim K=2: prior_mu MLP 제거만 (identity prior), u_rec 유지 → 절약 18K → d↑ rank↑
+    # 교훈: u_rec 없이는 학습 실패 (u_rec이 시퀀스 컨텍스트 핵심)
     slim2 = PRISMLangModel(
-        vocab_size=vocab_size, d=248, emb_dim=64, K=2,
-        decoder="mlp", dec_hidden=58,
-        simple_prior=True, use_urec=False,
-        mem_rank=32, mem_scale=4.0,
+        vocab_size=vocab_size, d=168, emb_dim=64, K=2,
+        decoder="mlp", dec_hidden=42,
+        simple_prior=True, use_urec=True,
+        mem_rank=24, mem_scale=4.0,
     )
     results["PRISM-slim-K2"] = train_one(slim2, train_loader, val_loader, args, "PRISM-slim-K2")
 
     # slim K=4: 단순화 + K 증가
     slim4 = PRISMLangModel(
-        vocab_size=vocab_size, d=196, emb_dim=64, K=4,
-        decoder="mlp", dec_hidden=48,
-        simple_prior=True, use_urec=False,
-        mem_rank=32, mem_scale=4.0,
+        vocab_size=vocab_size, d=168, emb_dim=64, K=4,
+        decoder="mlp", dec_hidden=42,
+        simple_prior=True, use_urec=True,
+        mem_rank=24, mem_scale=4.0,
     )
     results["PRISM-slim-K4"] = train_one(slim4, train_loader, val_loader, args, "PRISM-slim-K4")
 
