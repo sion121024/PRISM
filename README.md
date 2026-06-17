@@ -139,11 +139,18 @@ python verify_convergence.py
 
 ## de-risking 단계
 
-- [x] **Stage 1**: 에너지 수렴 확인
-- [x] **Stage 2**: char LM 기본 동작
-- [x] **Stage 3**: 비대칭 Hebbian + K-effect 첫 신호 (carry gate 포함)
-- [x] **Stage 4**: carry gate 없는 설계 정합 검증 → prior 없이 K-effect 없음 확인
-- [x] **Stage 7**: Prior 항 → K-effect 실증 (+1.765 ppl, K2→K4, 116K)
-- [x] **Stage 8**: 파라미터 매칭 (~55K) — PRISM K2가 LSTM을 6.9 ppl 앞섬 (진행 중)
-- [ ] **Stage 9**: 적응형 K(t) 검증 — 어려운 토큰에 더 많은 K
-- [ ] **Stage 10**: V100 스케일업 (50~150M params)
+### 완료
+- [x] **Stage 1** — 에너지 수렴 확인: dx/ds = −∂E/∂x 가 K번 반복 후 수렴
+- [x] **Stage 2** — char LM 기본 동작: PRISM이 TinyShakespeare에서 학습 가능
+- [x] **Stage 3** — 비대칭 Hebbian 복원: key=x̂, value=ê_mem → K-effect 0.04→1.74 (43×)
+- [x] **Stage 4** — 설계 정합 검증: carry gate 제거, prior 없이 K-effect 없음 확인
+- [x] **Stage 5/6** — u_rec 비선형화: 관측 증강 f([u_raw, x_prev]) 도입
+- [x] **Stage 7** — Prior 항 도입: ½‖x−μ(x_prev)‖²_Π3 → K-effect +1.765 ppl (K2→K4)
+- [x] **Stage 8** — 파라미터 매칭: PRISM 55K vs LSTM 56K, K2 기준 **13.601 vs ~20 ppl** (진행 중, K4/LSTM 대기)
+
+### 진행 예정
+- [ ] **Stage 9** — 적응형 K(t): 어려운 토큰에 더 많은 K-step 자동 배분
+- [ ] **Stage 10** — 긴 컨텍스트: block_size=512~1024, long-range dependency 검증
+- [ ] **Stage 11** — 현대 기준선 비교: Mamba / RWKV / xLSTM 파라미터 매칭
+- [ ] **Stage 12** — V100 스케일업: 50~150M params
+- [ ] **Stage 13** — 멀티모달: 비전 어댑터 + 행동 슬롯
