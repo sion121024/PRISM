@@ -68,6 +68,11 @@ class PRISMLangModel(nn.Module):
         )
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
+        # 설계 정합 순환: ũ = W_rec([u, x_prev]) → 에너지의 관측값 u를 풍부하게 만듦.
+        # E(x) = ½‖ũ − g(x)‖²_Π1 + ...  (에너지 내부 순환 의존성)
+        # carry gate(에너지 밖 변환) 대신 이 방식 사용.
+        self.u_recurrent = nn.Linear(d + emb_dim, emb_dim, bias=False)
+
         self.carry_nonlin = carry_nonlin
         if carry_nonlin:
             # carry gate는 하위호환용으로만 유지 (설계 비정합, 신규 코드에서 사용 금지)
@@ -119,7 +124,10 @@ class PRISMLangModel(nn.Module):
         u_all = self.embed(tokens[:, :-1])  # [B, T-1, emb_dim]
 
         for t in range(T - 1):
-            u = u_all[:, t]
+            u_raw = u_all[:, t]
+            # 설계 정합 순환: 이전 상태 x를 관측값 u에 합산
+            # ũ = W_rec([u, x_prev]) — 에너지 내부에서 순환 의존성 표현
+            u = self.u_recurrent(torch.cat([u_raw, x], dim=-1))
 
             if return_energies:
                 x_new, energies_t = self.cell.iterate(
@@ -135,7 +143,7 @@ class PRISMLangModel(nn.Module):
                 x = x_star
             else:
                 x, mem = self.cell(u, mem, x, training=is_training)
-                if self.carry_nonlin:
+                if self.carry_nonlin:  # 하위호환용, 신규 코드에선 u_recurrent가 담당
                     x = self.carry_ln(x + self.carry_gate(x))
 
             all_x.append(x)
@@ -176,7 +184,8 @@ class PRISMLangModel(nn.Module):
         x, mem = self.init_state(B, device)
 
         for tok in prompt.unbind(1):
-            u = self.embed(tok)
+            u_raw = self.embed(tok)
+            u = self.u_recurrent(torch.cat([u_raw, x], dim=-1))
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False)
             mem = self.cell.update_memory(x, mem)
 
@@ -190,7 +199,8 @@ class PRISMLangModel(nn.Module):
             next_tok = torch.multinomial(probs, 1).squeeze(-1)
             for b in range(B):
                 generated[b].append(next_tok[b].item())
-            u = self.embed(next_tok)
+            u_raw = self.embed(next_tok)
+            u = self.u_recurrent(torch.cat([u_raw, x], dim=-1))
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False)
             mem = self.cell.update_memory(x, mem)
 
