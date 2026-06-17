@@ -8,6 +8,7 @@ Stage 1 사활 검증: 에너지 수렴 확인.
 """
 
 import torch
+import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -48,7 +49,8 @@ def verify_energy_convergence(
         tokens = torch.randint(0, vocab_size, (batch_size,), device=device)
         x0 = torch.zeros(batch_size, d, device=device)
         u_raw = model.embed(tokens)
-        u = model.u_recurrent(torch.cat([u_raw, x0], dim=-1))
+        u = (model.u_rec2(F.gelu(model.u_rec1(torch.cat([u_raw, x0], dim=-1))))
+     if model.use_urec else u_raw)
         _, mem = model.cell.init_state(batch_size, device)
 
         _, energies = model.cell.iterate(u, mem, x0=x0, return_energies=True, K=K)
@@ -76,7 +78,8 @@ def verify_energy_convergence(
     tokens = torch.randint(0, vocab_size, (batch_size,), device=device)
     x0 = torch.zeros(batch_size, d, device=device)
     u_raw = model.embed(tokens)
-    u = model.u_recurrent(torch.cat([u_raw, x0], dim=-1))
+    u = (model.u_rec2(F.gelu(model.u_rec1(torch.cat([u_raw, x0], dim=-1))))
+     if model.use_urec else u_raw)
     _, mem = model.cell.init_state(batch_size, device)
     _, energies = model.cell.iterate(u, mem, x0=x0, return_energies=True, K=K)
     E0 = energies[0]
