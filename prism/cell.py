@@ -116,13 +116,13 @@ class PRISMCell(nn.Module):
         dec_hidden: int = 128,
         state_norm: Optional[bool] = None,
         mem_scale: float = 1.0,
+        use_prior: bool = False,
     ):
         super().__init__()
         assert memory_mode in ("sliding", "full_M", "none")
         assert decoder in ("linear", "mlp")
-        # 비선형 디코더는 기본적으로 상태 정규화 켬 (안정성)
         if state_norm is None:
-            state_norm = (decoder == "mlp")
+            state_norm = False  # K-루프 내 정규화 없음이 기본 (에너지 단조감소 보장)
         self.state_norm = state_norm
         self.d = d
         self.emb_dim = emb_dim
@@ -135,6 +135,7 @@ class PRISMCell(nn.Module):
         self.approximate_grad = approximate_grad
         self.decoder = decoder
         self.dec_hidden = dec_hidden
+        self.use_prior = use_prior
 
         if memory_mode == "sliding":
             self.sliding = SlidingMemory(d, mem_rank, mem_gamma, scale=mem_scale)
@@ -150,11 +151,21 @@ class PRISMCell(nn.Module):
             self.dec_W2 = nn.Parameter(torch.empty(emb_dim, dec_hidden))
             self.dec_b2 = nn.Parameter(torch.zeros(emb_dim))
 
-        # Π1: 학습 가능 대각 precision (입력 독립, MLP 제거)
+        # Π1: 학습 가능 대각 precision (입력 독립)
         self.log_pi1 = nn.Parameter(torch.zeros(emb_dim))
 
         # Π2: 기억 precision
         self.log_pi2 = nn.Parameter(torch.zeros(d))
+
+        # Prior 항: ½‖x − μ(x_prev)‖²_Π3
+        # 에너지 내부 상태 전이 — carry gate의 설계 정합 대체
+        if use_prior:
+            self.prior_mu = nn.Sequential(
+                nn.Linear(d, d // 4),
+                nn.GELU(),
+                nn.Linear(d // 4, d),
+            )
+            self.log_pi3 = nn.Parameter(torch.zeros(d))
 
         # 초기 상태 인코더
         self.x_init = nn.Linear(emb_dim, d)
@@ -206,6 +217,10 @@ class PRISMCell(nn.Module):
     def pi2(self) -> torch.Tensor:
         return F.softplus(self.log_pi2)  # [d]
 
+    @property
+    def pi3(self) -> torch.Tensor:
+        return F.softplus(self.log_pi3) if self.use_prior else None  # [d]
+
     # ---------------------------------------------------------------- #
     # M 연산                                                            #
     # ---------------------------------------------------------------- #
@@ -228,14 +243,17 @@ class PRISMCell(nn.Module):
     # 에너지 + 그래디언트                                                #
     # ---------------------------------------------------------------- #
 
-    def _neg_grad_E(self, x: torch.Tensor, u: torch.Tensor, mem_state) -> torch.Tensor:
+    def _neg_grad_E(
+        self, x: torch.Tensor, u: torch.Tensor, mem_state,
+        x_prior: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        −∂E/∂x = Dᵀ Π1 εin − (I−M)ᵀ Π2 εmem − λx
-        Π1, Π2: 상수 대각행렬 (배치 독립)
+        −∂E/∂x = Dᵀ Π1 εin − (I−M)ᵀ Π2 εmem − Π3(x−μ) − λx
+        μ = prior_mu(x_prev): 에너지 내부 상태 전이 prior (optional)
         """
         # 지각 항:  J_gᵀ Π1 (u − g(x))
-        eps_in  = u - self._decode(x)          # [B, emb_dim]
-        grad_in = self._dec_grad(x, self.pi1 * eps_in)  # [B, d]
+        eps_in  = u - self._decode(x)
+        grad_in = self._dec_grad(x, self.pi1 * eps_in)
 
         # 기억 항
         if self.memory_mode != "none" and mem_state is not None:
@@ -243,14 +261,22 @@ class PRISMCell(nn.Module):
             eps_mem  = x - Mx
             pi2_eps  = self.pi2 * eps_mem
             Mt_pi2e  = self._MtV(pi2_eps, mem_state)
-            grad_mem = pi2_eps - Mt_pi2e        # (I−M)ᵀ Π2 εmem
+            grad_mem = pi2_eps - Mt_pi2e
         else:
             grad_mem = x.new_zeros(x.shape)
 
-        # 정규화 항
-        return grad_in - grad_mem - self.lam * x
+        # Prior 항: −Π3(x − μ(x_prev))   → x를 에너지 내에서 prior 방향으로 당김
+        if self.use_prior and x_prior is not None:
+            grad_prior = self.pi3 * (x_prior - x)
+        else:
+            grad_prior = x.new_zeros(x.shape)
 
-    def energy(self, x: torch.Tensor, u: torch.Tensor, mem_state) -> torch.Tensor:
+        return grad_in - grad_mem + grad_prior - self.lam * x
+
+    def energy(
+        self, x: torch.Tensor, u: torch.Tensor, mem_state,
+        x_prior: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         eps_in = u - self._decode(x)
         pi1    = self.pi1
         pi2    = self.pi2
@@ -264,7 +290,13 @@ class PRISMCell(nn.Module):
         else:
             e_mem = x.new_zeros(x.shape[0])
 
-        return (e_in + e_mem + e_reg).mean()
+        if self.use_prior and x_prior is not None:
+            eps_p = x - x_prior
+            e_prior = 0.5 * (eps_p ** 2 * self.pi3).sum(-1)
+        else:
+            e_prior = x.new_zeros(x.shape[0])
+
+        return (e_in + e_mem + e_prior + e_reg).mean()
 
     # ---------------------------------------------------------------- #
     # 내부시계 s                                                        #
@@ -281,12 +313,13 @@ class PRISMCell(nn.Module):
         adaptive: bool = False,
         K_min: int = 1,
         K_tol: float = 1e-4,
+        x_prior: Optional[torch.Tensor] = None,
     ):
         """
         내부시계 s: K번 에너지 하강.
 
-        adaptive=True (추론 전용): 에너지가 K_tol 이하로 수렴하면 조기 종료.
-        이중시계 설계 — K(t) per-token 적응형 사고 깊이.
+        x_prior: prior_mu(x_prev) — ½‖x−μ‖²_Π3 항으로 에너지 내부 상태 전이.
+        adaptive=True (추론 전용): 에너지 수렴 시 조기 종료 (이중시계 설계).
         """
         K = K if K is not None else self.K
         x = self.x_init(u) if x0 is None else x0
@@ -295,17 +328,17 @@ class PRISMCell(nn.Module):
             energies: List[float] = []
             with torch.no_grad():
                 for _ in range(K):
-                    energies.append(self.energy(x, u, mem_state).item())
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
-                energies.append(self.energy(x, u, mem_state).item())
+                    energies.append(self.energy(x, u, mem_state, x_prior).item())
+                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
+                energies.append(self.energy(x, u, mem_state, x_prior).item())
             return x, energies
 
         if training and self.approximate_grad:
             with torch.no_grad():
                 for _ in range(K - 1):
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
             x = x.detach()
-            x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+            x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
             return x
 
         # 적응형 K (추론 전용): 에너지 수렴 시 조기 종료
@@ -313,17 +346,17 @@ class PRISMCell(nn.Module):
             with torch.no_grad():
                 prev_e = float('inf')
                 for k in range(K):
-                    e = self.energy(x, u, mem_state).item()
+                    e = self.energy(x, u, mem_state, x_prior).item()
                     if k >= K_min and abs(prev_e - e) / (abs(prev_e) + 1e-8) < K_tol:
                         break
                     prev_e = e
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
             return x
 
         # Full backprop (기본) — raw x 공간에서 정확한 에너지 경사하강
         with torch.set_grad_enabled(training):
             for _ in range(K):
-                x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+                x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
         return x
 
     def _rms(self, x: torch.Tensor) -> torch.Tensor:
@@ -368,8 +401,9 @@ class PRISMCell(nn.Module):
         mem_state,
         x0: Optional[torch.Tensor] = None,
         training: bool = True,
+        x_prior: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, object]:
-        x_star  = self.iterate(u, mem_state, x0, training=training)
+        x_star  = self.iterate(u, mem_state, x0, training=training, x_prior=x_prior)
         mem_new = self.update_memory(x_star.detach(), mem_state)
         return x_star, mem_new
 

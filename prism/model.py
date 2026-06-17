@@ -46,12 +46,14 @@ class PRISMLangModel(nn.Module):
         mem_scale: float = 1.0,
         carry_nonlin: bool = False,
         state_norm: Optional[bool] = None,
+        use_prior: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.d = d
         self.emb_dim = emb_dim
         self.use_deq = use_deq
+        self.use_prior = use_prior
 
         self.embed = nn.Embedding(vocab_size, emb_dim)
         self.cell = PRISMCell(
@@ -65,6 +67,7 @@ class PRISMLangModel(nn.Module):
             dec_hidden=dec_hidden,
             mem_scale=mem_scale,
             state_norm=state_norm,
+            use_prior=use_prior,
         )
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
@@ -144,12 +147,13 @@ class PRISMLangModel(nn.Module):
                 mem = self.cell.update_memory(x_star.detach(), mem)
                 x = x_star
             else:
-                x, mem = self.cell(u, mem, x, training=is_training)
+                # prior 항: μ = prior_mu(x_prev) — 에너지 내부 상태 전이
+                x_prior = self.cell.prior_mu(x) if self.use_prior else None
+                x, mem = self.cell(u, mem, x, training=is_training, x_prior=x_prior)
                 if self.carry_nonlin:  # 하위호환용 (설계 비정합)
                     x = self.carry_ln(x + self.carry_gate(x))
                 else:
                     # 토큰 간 상태 정규화 (파라미터 없음, 표현 스케일 고정)
-                    # carry gate의 LN 역할을 설계 정합적으로 수행
                     rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
                     x = x * rms
 
@@ -193,7 +197,8 @@ class PRISMLangModel(nn.Module):
         for tok in prompt.unbind(1):
             u_raw = self.embed(tok)
             u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
-            x = self.cell.iterate(u, mem, x, K=K_gen, training=False)
+            x_prior = self.cell.prior_mu(x) if self.use_prior else None
+            x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
             mem = self.cell.update_memory(x, mem)
             rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
             x = x * rms
@@ -210,7 +215,8 @@ class PRISMLangModel(nn.Module):
                 generated[b].append(next_tok[b].item())
             u_raw = self.embed(next_tok)
             u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
-            x = self.cell.iterate(u, mem, x, K=K_gen, training=False)
+            x_prior = self.cell.prior_mu(x) if self.use_prior else None
+            x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
             mem = self.cell.update_memory(x, mem)
             rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
             x = x * rms
