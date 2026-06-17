@@ -45,7 +45,21 @@ dx/ds = −∂E/∂x   (K번 반복 = 내부 사고 깊이)
 
 **데이터**: 셰익스피어 전집 ~1.1MB, vocab 65자, block_size=64
 
-#### Stage 8: 파라미터 매칭 최종 비교 (진행 중)
+#### Stage 10: 단순화 실험 (simple_prior vs prior_mu MLP)
+
+| 모델 | prior | params | BEST ppl |
+|------|-------|--------|----------|
+| PRISM-v1-K4 | 학습 MLP | 55,452 | **12.794** |
+| PRISM-slim-K2 | identity (μ=x_prev) | 55,258 | 17.359 |
+| PRISM-slim-K4 | identity (μ=x_prev) | 55,258 | 15.048 |
+
+- **단순화 비용**: v1-K4 vs slim-K4 → **+2.254 ppl** (10 epoch 기준)
+- **K-effect (slim)**: slim K2→K4 → **+2.311 ppl** (학습 prior의 0.66ppl 대비 3.5×)
+- **핵심 발견**: identity prior가 에너지 경관을 더 어렵게 만들어 K-effect가 3.5× 커짐
+- **수렴 패턴**: slim은 epoch 1-4 정체(~28 ppl) → epoch 4-5 돌파 → 지속 개선 (epoch 10에도 수렴 중)
+- **u_rec 필수 확인**: u_rec 제거 시 slim이 28 ppl 정체 (학습 실패) — u_rec은 제거 불가
+
+#### Stage 8: 파라미터 매칭 최종 비교
 
 동일 파라미터 예산(~55K)에서 공정 비교:
 
@@ -158,9 +172,7 @@ python verify_convergence.py
 - [x] **Stage 8** — 파라미터 매칭 완료: PRISM-K4 **12.942** vs LSTM **14.164** (−1.222 ppl), K-effect +0.659 ppl
 - [x] **Stage 9** — Mamba 비교: Mamba **6.605** vs PRISM-K4 **14.525** (Mamba 승, +7.9 ppl); K-effect +0.951 ppl 유지
 - [x] **Stage 9b** — 멀티모달 구현: 에너지에 시각 항 추가 → 이미지 없을 때 3.808 vs 있을 때 **3.218** ppl (+0.590 개선)
-
-### 진행 중
-- [ ] **Stage 10** — 단순화 (simple_prior + u_rec 유지 + d↑): v1-K4 12.8 ppl, slim-K4 TBD
+- [x] **Stage 10** — 단순화 분석: identity prior의 K-effect 3.5× 더 큼; u_rec 필수 확인; 10 epoch v1-K4 **12.794** vs slim-K4 15.048
 
 ### 진행 예정
 - [ ] **Stage 11** — 적응형 K(t) 실측: 엔트로피 기반 K 선택 vs 고정 K 비교
