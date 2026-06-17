@@ -290,36 +290,32 @@ class PRISMCell(nn.Module):
             energies: List[float] = []
             with torch.no_grad():
                 for _ in range(K):
-                    energies.append(self.energy(x, u, mem_state).item())
-                    x = self._state_norm(
-                        x + self.alpha * self._neg_grad_E(x, u, mem_state))
-                energies.append(self.energy(x, u, mem_state).item())
-            return x, energies
+                    energies.append(self.energy(self._rms(x), u, mem_state).item())
+                    x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
+                energies.append(self.energy(self._rms(x), u, mem_state).item())
+            return self._rms(x), energies
 
         if training and self.approximate_grad:
             # K-1 no_grad + 1 grad (근사 backward)
             with torch.no_grad():
                 for _ in range(K - 1):
-                    x = self._state_norm(
-                        x + self.alpha * self._neg_grad_E(x, u, mem_state))
+                    x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
             x = x.detach()
-            x = self._state_norm(
-                x + self.alpha * self._neg_grad_E(x, u, mem_state))
-            return x
+            x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
+            return self._rms(x)
 
         # Full backprop (기본)
         with torch.set_grad_enabled(training):
             for _ in range(K):
-                x = self._state_norm(
-                    x + self.alpha * self._neg_grad_E(x, u, mem_state))
-        return x
+                x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
+        return self._rms(x)
 
-    def _state_norm(self, x: torch.Tensor) -> torch.Tensor:
+    def _rms(self, x: torch.Tensor) -> torch.Tensor:
         """
-        하강 후 상태를 RMS 정규화 — 비볼록 E에서 토큰 간 발산 방지.
-        구(sphere) 위로의 projected gradient descent로 해석:
-        에너지는 내려가되 상태 노름은 유계.
-        linear 디코더에선 비활성 (None) — 기존 동작 보존.
+        Pre-norm RMS 정규화 — 에너지/디코더가 '읽는' 유계 상태.
+        raw x 는 루프에서 누적(반복+재귀 보존)되고, g·M 은 항상 x̂=_rms(x) 를
+        봐서 안정. transformer pre-norm 과 동일한 발상.
+        linear 디코더에선 no-op (state_norm=False) — Stage 1/2 동작 보존.
         """
         if not self.state_norm:
             return x
