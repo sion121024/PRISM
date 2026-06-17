@@ -148,10 +148,12 @@ python verify_convergence.py
 - [x] **Stage 5/6** — u_rec 비선형화: 관측 증강 f([u_raw, x_prev]) 도입
 - [x] **Stage 7** — Prior 항 도입: ½‖x−μ(x_prev)‖²_Π3 → K-effect +1.765 ppl (K2→K4)
 - [x] **Stage 8** — 파라미터 매칭 완료: PRISM-K4 **12.942** vs LSTM **14.164** (−1.222 ppl), K-effect +0.659 ppl
+- [x] **Stage 9** — Mamba 비교: Mamba **6.605** vs PRISM-K4 **14.525** (Mamba 승, +7.9 ppl); K-effect +0.951 ppl 유지
+- [x] **Stage 9b** — 멀티모달 구현: 에너지에 시각 항 추가 → 이미지 없을 때 3.808 vs 있을 때 **3.218** ppl (+0.590 개선)
 
 ### 진행 예정
-- [ ] **Stage 9** — 적응형 K(t): 어려운 토큰에 더 많은 K-step 자동 배분
-- [ ] **Stage 10** — 긴 컨텍스트: block_size=512~1024, long-range dependency 검증
-- [ ] **Stage 11** — 현대 기준선 비교: Mamba / RWKV / xLSTM 파라미터 매칭
-- [ ] **Stage 12** — V100 스케일업: 50~150M params
-- [ ] **Stage 13** — 멀티모달: 비전 어댑터 + 행동 슬롯
+- [ ] **Stage 10** — PRISM 약점 개선: Mamba 격차(7.9 ppl) 분석 및 long-range 강화
+- [ ] **Stage 11** — 적응형 K(t) 실측: 어려운 토큰 K 많이 vs 고정 K ppl 비교
+- [ ] **Stage 12** — 멀티모달 스케일: 실제 이미지(MNIST/CIFAR) + 텍스트 태스크
+- [ ] **Stage 13** — V100 스케일업: 50~150M params
+- [ ] **Stage 14** — 행동 슬롯: 연속 행동 공간 (게임/로봇 제어)
