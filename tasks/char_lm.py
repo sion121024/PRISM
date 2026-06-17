@@ -13,24 +13,34 @@ from typing import Tuple, List, Optional
 
 
 class CharDataset(Dataset):
-    """임의 텍스트 파일을 문자 레벨로 읽는 데이터셋."""
+    """임의 텍스트 파일을 문자 레벨로 읽는 데이터셋.
+
+    vocab(stoi)를 외부에서 주입할 수 있음 — train/val split이
+    동일한 문자→인덱스 매핑을 공유하도록 보장.
+    """
 
     def __init__(
         self,
         text: str,
         block_size: int = 128,
         stride: int = None,
+        stoi: Optional[dict] = None,
     ):
         self.block_size = block_size
         stride = stride or block_size
 
-        # 문자 → 인덱스 매핑
-        chars = sorted(set(text))
-        self.vocab_size = len(chars)
-        self.stoi = {c: i for i, c in enumerate(chars)}
+        # 문자 → 인덱스 매핑 (주입 우선, 없으면 text에서 생성)
+        if stoi is None:
+            chars = sorted(set(text))
+            stoi = {c: i for i, c in enumerate(chars)}
+        self.stoi = stoi
         self.itos = {i: c for c, i in self.stoi.items()}
+        self.vocab_size = len(self.stoi)
 
-        data = torch.tensor([self.stoi[c] for c in text], dtype=torch.long)
+        # 매핑에 없는 문자는 0으로 (split 간 안전)
+        data = torch.tensor(
+            [self.stoi.get(c, 0) for c in text], dtype=torch.long
+        )
 
         # 슬라이딩 윈도우로 청크 분할
         self.chunks: List[torch.Tensor] = []
@@ -108,6 +118,10 @@ def TinyShakespeare(
             print(f"Download failed ({e}), using fallback text.")
             text = FALLBACK_TEXT
 
+    # vocab은 전체 텍스트에서 생성 → train/val 매핑 공유
+    chars = sorted(set(text))
+    stoi = {c: i for i, c in enumerate(chars)}
+
     n = int(len(text) * train_frac)
     text_split = text[:n] if split == "train" else text[n:]
-    return CharDataset(text_split, block_size=block_size)
+    return CharDataset(text_split, block_size=block_size, stoi=stoi)
