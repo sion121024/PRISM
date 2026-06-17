@@ -86,21 +86,28 @@ dx/ds = −∂E/∂x   (K번 반복 = 내부 사고 깊이)
 
 ```
 prism/
-  cell.py        # PRISMCell — 에너지 함수, 그래디언트, K-step, 적응형 K
-  deq.py         # DEQ 솔버 (Anderson acceleration)
-  model.py       # PRISMLangModel — 전체 언어 모델
+  cell.py           # PRISMCell — 에너지 함수, 그래디언트, K-step
+  deq.py            # DEQ 솔버 (Anderson acceleration)
+  model.py          # PRISMLangModel — 전체 언어 모델 (adaptive K, simple_prior)
+  multimodal.py     # PRISMMultimodalModel — 멀티모달 확장 (시각 에너지 항)
 tasks/
-  char_lm.py     # TinyShakespeare (문자 LM)
+  char_lm.py        # TinyShakespeare (문자 LM)
   copy_task.py
   assoc_recall.py
 baselines/
   lstm_lm.py
+  mamba_lm.py       # Mamba (S6 선택적 SSM, 순수 PyTorch)
 stage3_ablation.py     # 비대칭 Hebbian + carry gate ablation
-stage4_design.py       # 설계 정합 검증 (no carry, prior 없음 → K-effect 없음)
+stage4_design.py       # 설계 정합 검증 (prior 없음 → K-effect 없음)
 stage7_prior.py        # Prior 항 추가 → K-effect 실증
 stage8_param_match.py  # 파라미터 매칭 최종 비교 (55K vs 56K)
-verify_adaptive_k.py   # 적응형 K(t): 어려운 토큰 = 더 많은 K
-verify_convergence.py  # 에너지 수렴 확인
+stage9_mamba_compare.py   # Mamba 비교 (6.6 ppl vs PRISM 14.5 ppl)
+stage10_slim.py           # 단순화: simple_prior + larger d (진행 중)
+stage11_adaptive_k.py     # 적응형 K(t) 실측: 엔트로피 기반 K 선택
+stage12_gap_analysis.py   # Mamba 격차 원인 분석 (K↑, context↑, rank↑)
+verify_adaptive_k.py   # 적응형 K(t): 에너지 수렴 기반 조기 종료
+verify_convergence.py  # 에너지 수렴 확인 (Stage 1)
+verify_multimodal.py   # 멀티모달 학습 검증 (숫자 캡셔닝)
 ```
 
 ---
@@ -133,8 +140,9 @@ python verify_convergence.py
 | `alpha` | 0.05 | 내부 스텝 크기 |
 | `mem_scale` | 4.0 | Hebbian 메모리 강도 |
 | `mem_rank` | 32 | 슬라이딩 메모리 rank |
-| `use_prior` | True | Prior 항 활성화 (K-effect 필수) |
-| `use_urec` | True | 관측 증강 (u_rec: 입력+이전상태 융합) |
+| `use_prior` | False | Prior 항 (학습 MLP μ(x_prev)) |
+| `simple_prior` | True | Identity prior (μ = x_prev, 파라미터 없음) |
+| `use_urec` | True | 관측 증강 (u_rec: 입력+이전상태 융합, 필수) |
 
 ---
 
@@ -151,9 +159,11 @@ python verify_convergence.py
 - [x] **Stage 9** — Mamba 비교: Mamba **6.605** vs PRISM-K4 **14.525** (Mamba 승, +7.9 ppl); K-effect +0.951 ppl 유지
 - [x] **Stage 9b** — 멀티모달 구현: 에너지에 시각 항 추가 → 이미지 없을 때 3.808 vs 있을 때 **3.218** ppl (+0.590 개선)
 
+### 진행 중
+- [ ] **Stage 10** — 단순화 (simple_prior + u_rec 유지 + d↑): v1-K4 12.8 ppl, slim-K4 TBD
+
 ### 진행 예정
-- [ ] **Stage 10** — PRISM 약점 개선: Mamba 격차(7.9 ppl) 분석 및 long-range 강화
-- [ ] **Stage 11** — 적응형 K(t) 실측: 어려운 토큰 K 많이 vs 고정 K ppl 비교
-- [ ] **Stage 12** — 멀티모달 스케일: 실제 이미지(MNIST/CIFAR) + 텍스트 태스크
+- [ ] **Stage 11** — 적응형 K(t) 실측: 엔트로피 기반 K 선택 vs 고정 K 비교
+- [ ] **Stage 12** — Mamba 격차 원인 분석: K↑, block_size↑, mem_rank↑ 효과 측정
 - [ ] **Stage 13** — V100 스케일업: 50~150M params
 - [ ] **Stage 14** — 행동 슬롯: 연속 행동 공간 (게임/로봇 제어)
