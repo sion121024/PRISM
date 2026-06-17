@@ -46,24 +46,20 @@ class SlidingMemory:
             "filled": 0,
         }
 
-    def _weights(self, device: torch.device) -> torch.Tensor:
-        r = self.rank
-        return self.decay ** torch.arange(r, device=device).float()
-
     def _apply_sym(self, x_q: torch.Tensor, state: dict) -> torch.Tensor:
         """
-        M x_q = Σ_i w_i (k_i·x_q)/√d · k_i   (단위 키, 대칭 PSD → 유계).
+        M x_q = Σ_i w_i (k_i·x_q) · k_i   (단위 키, 대칭 PSD → 유계).
         M 이 대칭이므로 apply 와 apply_T 가 동일 → 에너지 그래디언트 정확.
         """
         if state["filled"] == 0:
             return x_q.new_zeros(x_q.shape)
-        k_buf = state["k_buf"]                          # 단위 정규화된 키
+        k_buf = state["k_buf"]                          # [B, r, d] 단위 정규화
         ptr   = state["ptr"]
         r     = self.rank
-        ages = torch.zeros(r, device=x_q.device)
-        for i in range(r):
-            ages[(ptr - 1 - i) % r] = float(i)
-        w = (self.decay ** ages).unsqueeze(0)           # [1, r]
+        # Python for-loop 제거: ages[j] = (ptr-1-j) % r (벡터화)
+        pos  = torch.arange(r, device=x_q.device)
+        ages = (ptr - 1 - pos) % r                     # [r]
+        w = (self.decay ** ages.float()).unsqueeze(0)   # [1, r]
         dots = (k_buf * x_q.unsqueeze(1)).sum(-1) * w * self.scale  # [B, r]
         return (dots.unsqueeze(-1) * k_buf).sum(1)      # [B, d]
 
