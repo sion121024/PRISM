@@ -82,6 +82,9 @@ def main():
     p.add_argument("--alpha", type=float, default=0.05)
     p.add_argument("--mem_rank", type=int, default=16)
     p.add_argument("--tbptt", type=int, default=0)
+    p.add_argument("--decoder", choices=["linear", "mlp"], default="linear")
+    p.add_argument("--dec_hidden", type=int, default=64)
+    p.add_argument("--skip_lstm", action="store_true", default=False)
     # LSTM (param-matched)
     p.add_argument("--lstm_hidden", type=int, default=80)
     p.add_argument("--lstm_layers", type=int, default=1)
@@ -97,19 +100,22 @@ def main():
 
     results = {}
 
+    pname = f"PRISM-{args.decoder}"
     prism = PRISMLangModel(
         vocab_size=vocab_size, d=args.d, emb_dim=args.emb_dim,
         K=args.K, alpha=args.alpha, memory_mode="sliding", mem_rank=args.mem_rank,
+        decoder=args.decoder, dec_hidden=args.dec_hidden,
     )
-    results["PRISM"] = train_one(
-        prism, train_loader, val_loader, vocab_size, args, "PRISM", args.tbptt)
+    results[pname] = train_one(
+        prism, train_loader, val_loader, vocab_size, args, pname, args.tbptt)
 
-    lstm = LSTMLangModel(
-        vocab_size=vocab_size, emb_dim=args.emb_dim,
-        hidden_dim=args.lstm_hidden, n_layers=args.lstm_layers,
-    )
-    results["LSTM"] = train_one(
-        lstm, train_loader, val_loader, vocab_size, args, "LSTM", None)
+    if not args.skip_lstm:
+        lstm = LSTMLangModel(
+            vocab_size=vocab_size, emb_dim=args.emb_dim,
+            hidden_dim=args.lstm_hidden, n_layers=args.lstm_layers,
+        )
+        results["LSTM"] = train_one(
+            lstm, train_loader, val_loader, vocab_size, args, "LSTM", None)
 
     print("\n" + "=" * 50)
     print("Stage 2 결과 (낮을수록 좋음)")

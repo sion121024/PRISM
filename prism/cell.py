@@ -35,6 +35,7 @@ class SlidingMemory:
         self.d = d
         self.rank = rank
         self.decay = 1.0 - gamma
+        self.scale = 1.0 / (d ** 0.5)   # 1/√d — 어텐션식 스케일, 유계 보장
 
     def init(self, B: int, device: torch.device) -> dict:
         return {
@@ -48,45 +49,38 @@ class SlidingMemory:
         r = self.rank
         return self.decay ** torch.arange(r, device=device).float()
 
-    def apply(self, x_q: torch.Tensor, state: dict) -> torch.Tensor:
+    def _apply_sym(self, x_q: torch.Tensor, state: dict) -> torch.Tensor:
+        """
+        M x_q = Σ_i w_i (k_i·x_q)/√d · k_i   (단위 키, 대칭 PSD → 유계).
+        M 이 대칭이므로 apply 와 apply_T 가 동일 → 에너지 그래디언트 정확.
+        """
         if state["filled"] == 0:
             return x_q.new_zeros(x_q.shape)
-        k_buf = state["k_buf"]
-        v_buf = state["v_buf"]
+        k_buf = state["k_buf"]                          # 단위 정규화된 키
         ptr   = state["ptr"]
         r     = self.rank
-        # age: buf[ptr-1]=0, buf[ptr-2]=1, ...
         ages = torch.zeros(r, device=x_q.device)
         for i in range(r):
             ages[(ptr - 1 - i) % r] = float(i)
-        w = (self.decay ** ages).unsqueeze(0)  # [1, r]
-        dots = (k_buf * x_q.unsqueeze(1)).sum(-1) * w   # [B, r]
-        return (dots.unsqueeze(-1) * v_buf).sum(1)       # [B, d]
+        w = (self.decay ** ages).unsqueeze(0)           # [1, r]
+        dots = (k_buf * x_q.unsqueeze(1)).sum(-1) * w * self.scale  # [B, r]
+        return (dots.unsqueeze(-1) * k_buf).sum(1)      # [B, d]
 
-    def apply_T(self, v_q: torch.Tensor, state: dict) -> torch.Tensor:
-        if state["filled"] == 0:
-            return v_q.new_zeros(v_q.shape)
-        k_buf = state["k_buf"]
-        v_buf = state["v_buf"]
-        ptr   = state["ptr"]
-        r     = self.rank
-        ages = torch.zeros(r, device=v_q.device)
-        for i in range(r):
-            ages[(ptr - 1 - i) % r] = float(i)
-        w = (self.decay ** ages).unsqueeze(0)
-        dots = (v_buf * v_q.unsqueeze(1)).sum(-1) * w
-        return (dots.unsqueeze(-1) * k_buf).sum(1)
+    # 대칭 메모리: apply == apply_T
+    apply = _apply_sym
+    apply_T = _apply_sym
 
     @torch.no_grad()
     def update(self, x_new: torch.Tensor, eps_new: torch.Tensor, state: dict) -> dict:
+        # auto-associative: 단위 정규화된 x 를 키로 저장 (eps_new 미사용)
         ptr = state["ptr"]
+        k = x_new.detach()
+        k = k / k.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         new_k = state["k_buf"].clone()
-        new_v = state["v_buf"].clone()
-        new_k[:, ptr, :] = x_new.detach()
-        new_v[:, ptr, :] = eps_new.detach()
+        new_k[:, ptr, :] = k
         return {
             "k_buf" : new_k,
-            "v_buf" : new_v,
+            "v_buf" : new_k,        # 대칭 (미사용이지만 호환 유지)
             "ptr"   : (ptr + 1) % self.rank,
             "filled": min(state["filled"] + 1, self.rank),
         }
@@ -123,9 +117,17 @@ class PRISMCell(nn.Module):
         memory_mode: str = "sliding",
         mem_rank: int = 32,
         approximate_grad: bool = False,
+        decoder: str = "linear",
+        dec_hidden: int = 128,
+        state_norm: Optional[bool] = None,
     ):
         super().__init__()
         assert memory_mode in ("sliding", "full_M", "none")
+        assert decoder in ("linear", "mlp")
+        # 비선형 디코더는 기본적으로 상태 정규화 켬 (안정성)
+        if state_norm is None:
+            state_norm = (decoder == "mlp")
+        self.state_norm = state_norm
         self.d = d
         self.emb_dim = emb_dim
         self.lam = lam
@@ -135,12 +137,22 @@ class PRISMCell(nn.Module):
         self.mem_gamma = mem_gamma
         self.memory_mode = memory_mode
         self.approximate_grad = approximate_grad
+        self.decoder = decoder
+        self.dec_hidden = dec_hidden
 
         if memory_mode == "sliding":
             self.sliding = SlidingMemory(d, mem_rank, mem_gamma)
 
-        # 느린가중치 θ
-        self.D = nn.Linear(d, emb_dim, bias=False)
+        # 느린가중치 θ — 생성모델 g: ℝ^d → ℝ^emb
+        #   linear: g(x) = D x          → E 가 2차식 (사고가 자명)
+        #   mlp   : g(x) = W2·tanh(W1 x) → E 가 비볼록 (진짜 사고)
+        if decoder == "linear":
+            self.D = nn.Linear(d, emb_dim, bias=False)
+        else:
+            self.dec_W1 = nn.Parameter(torch.empty(dec_hidden, d))
+            self.dec_b1 = nn.Parameter(torch.zeros(dec_hidden))
+            self.dec_W2 = nn.Parameter(torch.empty(emb_dim, dec_hidden))
+            self.dec_b2 = nn.Parameter(torch.zeros(emb_dim))
 
         # Π1: 학습 가능 대각 precision (입력 독립, MLP 제거)
         self.log_pi1 = nn.Parameter(torch.zeros(emb_dim))
@@ -151,12 +163,44 @@ class PRISMCell(nn.Module):
         # 초기 상태 인코더
         self.x_init = nn.Linear(emb_dim, d)
 
+        # 상태 정규화 게인 (RMSNorm scale)
+        self.norm_gain = nn.Parameter(torch.ones(d))
+
         self._init_weights()
 
     def _init_weights(self):
-        nn.init.normal_(self.D.weight, std=0.02)
+        if self.decoder == "linear":
+            nn.init.normal_(self.D.weight, std=0.02)
+        else:
+            nn.init.normal_(self.dec_W1, std=0.02)
+            nn.init.normal_(self.dec_W2, std=0.02)
         nn.init.normal_(self.x_init.weight, std=0.02)
         nn.init.zeros_(self.x_init.bias)
+
+    # ---------------------------------------------------------------- #
+    # 생성모델 g 와 그 Jacobianᵀ                                        #
+    # ---------------------------------------------------------------- #
+
+    def _decode(self, x: torch.Tensor) -> torch.Tensor:
+        """g(x): 상태 → 예측된 입력 (ℝ^d → ℝ^emb)."""
+        if self.decoder == "linear":
+            return self.D(x)
+        h = torch.tanh(x @ self.dec_W1.t() + self.dec_b1)   # [B, dec_hidden]
+        return h @ self.dec_W2.t() + self.dec_b2            # [B, emb]
+
+    def _dec_grad(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """
+        Jacobian(g)ᵀ · w   (w ∈ ℝ^emb → 결과 ℝ^d).
+        −∂/∂x ½‖u−g(x)‖²_Π1 = J_gᵀ (Π1 (u−g(x))) 계산에 사용.
+        """
+        if self.decoder == "linear":
+            return w @ self.D.weight                        # Dᵀ w
+        # g = W2·tanh(W1 x + b1) + b2  →  J_gᵀ w = W1ᵀ (tanh'(z) ⊙ (W2ᵀ w))
+        z = x @ self.dec_W1.t() + self.dec_b1
+        h = torch.tanh(z)
+        b = w @ self.dec_W2                                  # W2ᵀ w   [B, dec_hidden]
+        c = b * (1.0 - h * h)                                # tanh'(z) ⊙ ·
+        return c @ self.dec_W1                               # W1ᵀ c   [B, d]
 
     @property
     def pi1(self) -> torch.Tensor:
@@ -193,9 +237,9 @@ class PRISMCell(nn.Module):
         −∂E/∂x = Dᵀ Π1 εin − (I−M)ᵀ Π2 εmem − λx
         Π1, Π2: 상수 대각행렬 (배치 독립)
         """
-        # 지각 항
-        eps_in  = u - self.D(x)           # [B, emb_dim]
-        grad_in = (self.pi1 * eps_in) @ self.D.weight   # [B, d]
+        # 지각 항:  J_gᵀ Π1 (u − g(x))
+        eps_in  = u - self._decode(x)          # [B, emb_dim]
+        grad_in = self._dec_grad(x, self.pi1 * eps_in)  # [B, d]
 
         # 기억 항
         if self.memory_mode != "none" and mem_state is not None:
@@ -211,7 +255,7 @@ class PRISMCell(nn.Module):
         return grad_in - grad_mem - self.lam * x
 
     def energy(self, x: torch.Tensor, u: torch.Tensor, mem_state) -> torch.Tensor:
-        eps_in = u - self.D(x)
+        eps_in = u - self._decode(x)
         pi1    = self.pi1
         pi2    = self.pi2
         e_in   = 0.5 * (eps_in ** 2 * pi1).sum(-1)
@@ -247,7 +291,8 @@ class PRISMCell(nn.Module):
             with torch.no_grad():
                 for _ in range(K):
                     energies.append(self.energy(x, u, mem_state).item())
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+                    x = self._state_norm(
+                        x + self.alpha * self._neg_grad_E(x, u, mem_state))
                 energies.append(self.energy(x, u, mem_state).item())
             return x, energies
 
@@ -255,16 +300,31 @@ class PRISMCell(nn.Module):
             # K-1 no_grad + 1 grad (근사 backward)
             with torch.no_grad():
                 for _ in range(K - 1):
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+                    x = self._state_norm(
+                        x + self.alpha * self._neg_grad_E(x, u, mem_state))
             x = x.detach()
-            x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+            x = self._state_norm(
+                x + self.alpha * self._neg_grad_E(x, u, mem_state))
             return x
 
         # Full backprop (기본)
         with torch.set_grad_enabled(training):
             for _ in range(K):
-                x = x + self.alpha * self._neg_grad_E(x, u, mem_state)
+                x = self._state_norm(
+                    x + self.alpha * self._neg_grad_E(x, u, mem_state))
         return x
+
+    def _state_norm(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        하강 후 상태를 RMS 정규화 — 비볼록 E에서 토큰 간 발산 방지.
+        구(sphere) 위로의 projected gradient descent로 해석:
+        에너지는 내려가되 상태 노름은 유계.
+        linear 디코더에선 비활성 (None) — 기존 동작 보존.
+        """
+        if not self.state_norm:
+            return x
+        rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+        return x * rms * self.norm_gain
 
     # ---------------------------------------------------------------- #
     # 외부시계 t: Hebbian 기억 갱신                                     #
