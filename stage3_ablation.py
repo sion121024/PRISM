@@ -69,12 +69,14 @@ def train_one(model, train_loader, val_loader, args, name):
     return best_ppl, n_params
 
 
-def make_prism(vocab_size, d, emb_dim, K, alpha, mem_rank, mem_scale, carry_nonlin):
+def make_prism(vocab_size, d, emb_dim, K, alpha, mem_rank, mem_scale, carry_nonlin, decoder="linear", state_norm=None):
     return PRISMLangModel(
         vocab_size=vocab_size, d=d, emb_dim=emb_dim,
         K=K, alpha=alpha, memory_mode="sliding",
         mem_rank=mem_rank, mem_scale=mem_scale,
-        decoder="linear", carry_nonlin=carry_nonlin,
+        decoder=decoder, dec_hidden=64,
+        carry_nonlin=carry_nonlin,
+        state_norm=state_norm,
     )
 
 
@@ -104,17 +106,19 @@ def main():
     # mem_scale = spectral_norm(M) 근사 (SlidingMemory.scale = mem_scale/rank)
     # 안정성 조건: alpha*(1+mem_scale)²*pi2_max < 2  →  mem_scale < 6.6 (alpha=0.05)
     configs = [
-        # name,             mem_scale,  mem_rank, carry_nonlin
-        ("A-baseline",      1.0,        16,       False),   # 구 기본값 재현
-        ("B-mem_boost",     4.0,        32,       False),   # 방향 1: 4× 메모리 강화
-        ("C-mem+carry",     4.0,        32,       True),    # 방향 1+3: carry gate 추가
+        # name,              ms,   rank, carry,  dec,      sn,    K
+        ("A-baseline",       1.0,  16,   False,  "linear", None,  2),
+        ("B-mem_boost",      4.0,  32,   False,  "linear", None,  2),
+        ("C-mem+carry",      4.0,  32,   True,   "linear", None,  2),
+        ("D-mlp+carry",      4.0,  32,   True,   "mlp",    False, 2),  # carry+mlp decoder, K=2
+        ("E-mlp+carry-K4",   4.0,  32,   True,   "mlp",    False, 4),  # carry+mlp decoder, K=4
     ]
 
     results = {}
-    for name, mem_scale, mem_rank, carry_nonlin in configs:
+    for name, mem_scale, mem_rank, carry_nonlin, decoder, state_norm, K in configs:
         model = make_prism(
-            vocab_size, args.d, args.emb_dim, args.K, args.alpha,
-            mem_rank, mem_scale, carry_nonlin,
+            vocab_size, args.d, args.emb_dim, K, args.alpha,
+            mem_rank, mem_scale, carry_nonlin, decoder, state_norm,
         )
         results[name] = train_one(model, train_loader, val_loader, args, name)
 
@@ -133,6 +137,8 @@ def main():
     print()
     print("방향 1 효과: A vs B (메모리 강화)")
     print("방향 3 효과: B vs C (carry gate 추가)")
+    print("방향 4 효과: C vs D (mlp decoder 추가)")
+    print("방향 5 효과: D vs E (K=4 증가)")
 
 
 if __name__ == "__main__":

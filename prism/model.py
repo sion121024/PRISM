@@ -45,6 +45,7 @@ class PRISMLangModel(nn.Module):
         dec_hidden: int = 128,
         mem_scale: float = 1.0,
         carry_nonlin: bool = False,
+        state_norm: Optional[bool] = None,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -63,6 +64,7 @@ class PRISMLangModel(nn.Module):
             decoder=decoder,
             dec_hidden=dec_hidden,
             mem_scale=mem_scale,
+            state_norm=state_norm,
         )
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 

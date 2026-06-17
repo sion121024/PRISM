@@ -27,8 +27,11 @@ from typing import Optional, Tuple, List, Union
 class SlidingMemory:
     """
     rank-r 슬라이딩 윈도우 연상기억.
-    M x_q ≈ Σ_i w_i (k_i · x_q) v_i
-    원형 버퍼 + mul+sum (einsum 없음, clone 최소화)
+    M x_q ≈ Σ_i w_i (k_i · x_q) k_i   (단위 키, 대칭 PSD → 유계)
+
+    순수 텐서 상태 [B, rank, d]: slot 0 = newest, slot rank-1 = oldest.
+    Python int 필드(ptr, filled) 제거 → torch.compile 호환.
+    빈 슬롯(zeros)은 dot=0이므로 filled 체크 불필요.
     """
 
     def __init__(self, d: int, rank: int, gamma: float, scale: float = 1.0):
@@ -38,49 +41,35 @@ class SlidingMemory:
         # scale/rank → spectral_norm(M) ≈ scale (rank 독립, α 안정성 보장)
         self.scale = scale / rank
 
-    def init(self, B: int, device: torch.device) -> dict:
-        return {
-            "k_buf": torch.zeros(B, self.rank, self.d, device=device),
-            "v_buf": torch.zeros(B, self.rank, self.d, device=device),
-            "ptr"  : 0,
-            "filled": 0,
-        }
+    def init(self, B: int, device: torch.device) -> torch.Tensor:
+        return torch.zeros(B, self.rank, self.d, device=device)
 
-    def _apply_sym(self, x_q: torch.Tensor, state: dict) -> torch.Tensor:
+    def apply(self, x_q: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
         """
-        M x_q = Σ_i w_i (k_i·x_q) · k_i   (단위 키, 대칭 PSD → 유계).
-        M 이 대칭이므로 apply 와 apply_T 가 동일 → 에너지 그래디언트 정확.
+        M x_q = Σ_i w_i (k_i·x_q) · k_i
+        slot 0=newest weight=1, slot i weight=decay^i.
+        빈 슬롯(zeros)은 dot=0 → 자동으로 기여 없음.
         """
-        if state["filled"] == 0:
-            return x_q.new_zeros(x_q.shape)
-        k_buf = state["k_buf"]                          # [B, r, d] 단위 정규화
-        ptr   = state["ptr"]
-        r     = self.rank
-        # Python for-loop 제거: ages[j] = (ptr-1-j) % r (벡터화)
-        pos  = torch.arange(r, device=x_q.device)
-        ages = (ptr - 1 - pos) % r                     # [r]
-        w = (self.decay ** ages.float()).unsqueeze(0)   # [1, r]
-        dots = (k_buf * x_q.unsqueeze(1)).sum(-1) * w * self.scale  # [B, r]
-        return (dots.unsqueeze(-1) * k_buf).sum(1)      # [B, d]
+        w = (self.decay ** torch.arange(self.rank, device=x_q.device).float()).unsqueeze(0)  # [1, r]
+        dots = (state * x_q.unsqueeze(1)).sum(-1) * w * self.scale  # [B, r]
+        return (dots.unsqueeze(-1) * state).sum(1)                   # [B, d]
 
-    # 대칭 메모리: apply == apply_T
-    apply = _apply_sym
-    apply_T = _apply_sym
+    def apply_T(self, x_q: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        """대칭 메모리: apply_T == apply."""
+        return self.apply(x_q, state)
 
     @torch.no_grad()
-    def update(self, x_new: torch.Tensor, eps_new: torch.Tensor, state: dict) -> dict:
-        # auto-associative: 단위 정규화된 x 를 키로 저장 (eps_new 미사용)
-        ptr = state["ptr"]
+    def update(self, x_new: torch.Tensor, eps_new: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        """
+        새 키를 slot 0 에 삽입하고 기존 항목을 한 칸씩 밀어내는 shift.
+        eps_new 는 API 호환성을 위해 받지만 사용하지 않음.
+        """
         k = x_new.detach()
         k = k / k.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        new_k = state["k_buf"].clone()
-        new_k[:, ptr, :] = k
-        return {
-            "k_buf" : new_k,
-            "v_buf" : new_k,        # 대칭 (미사용이지만 호환 유지)
-            "ptr"   : (ptr + 1) % self.rank,
-            "filled": min(state["filled"] + 1, self.rank),
-        }
+        new_state = torch.empty_like(state)
+        new_state[:, 0, :] = k                  # newest in slot 0
+        new_state[:, 1:, :] = state[:, :-1, :]  # shift older entries down
+        return new_state
 
 
 # ------------------------------------------------------------------ #
