@@ -45,7 +45,10 @@ class SlidingMemory:
         self.scale = scale / rank  # spectral_norm(M) ≈ scale
 
     def _w(self, device: torch.device) -> torch.Tensor:
-        return (self.decay ** torch.arange(self.rank, device=device).float()).unsqueeze(0)
+        if not hasattr(self, '_w_cache') or self._w_cache.device != device:
+            self._w_cache = (self.decay ** torch.arange(
+                self.rank, device=device).float()).unsqueeze(0)
+        return self._w_cache
 
     def init(self, B: int, device: torch.device):
         z = torch.zeros(B, self.rank, self.d, device=device)
@@ -250,30 +253,41 @@ class PRISMCell(nn.Module):
     def _neg_grad_E(
         self, x: torch.Tensor, u: torch.Tensor, mem_state,
         x_prior: Optional[torch.Tensor] = None,
+        _pi1=None, _pi2=None, _pi3=None,
     ) -> torch.Tensor:
         """
         −∂E/∂x = Dᵀ Π1 εin − (I−M)ᵀ Π2 εmem − Π3(x−μ) − λx
-        μ = prior_mu(x_prev): 에너지 내부 상태 전이 prior (optional)
+
+        _pi1/_pi2/_pi3: precomputed precision vectors (avoid repeated softplus per K-step).
         """
-        # 지각 항:  J_gᵀ Π1 (u − g(x))
-        eps_in  = u - self._decode(x)
-        grad_in = self._dec_grad(x, self.pi1 * eps_in)
+        pi1 = _pi1 if _pi1 is not None else self.pi1
+        pi2 = _pi2 if _pi2 is not None else self.pi2
+
+        # 지각 항: fused decode + Jacobian^T (MLP에서 x@W1 한 번만 계산)
+        if self.decoder == "mlp":
+            z = x @ self.dec_W1.t() + self.dec_b1         # [B, dec_h]
+            h = torch.tanh(z)
+            eps_in = u - (h @ self.dec_W2.t() + self.dec_b2)  # u − g(x)
+            b = (pi1 * eps_in) @ self.dec_W2               # W2ᵀ(Π1 εin) [B, dec_h]
+            grad_in = (b * (1.0 - h * h)) @ self.dec_W1   # W1ᵀ(tanh' ⊙ b) [B, d]
+        else:
+            eps_in = u - self.D(x)
+            grad_in = (pi1 * eps_in) @ self.D.weight
 
         # 기억 항
         if self.memory_mode != "none" and mem_state is not None:
             Mx       = self._Mx(x, mem_state)
             eps_mem  = x - Mx
-            pi2_eps  = self.pi2 * eps_mem
+            pi2_eps  = pi2 * eps_mem
             Mt_pi2e  = self._MtV(pi2_eps, mem_state)
             grad_mem = pi2_eps - Mt_pi2e
         else:
             grad_mem = x.new_zeros(x.shape)
 
         # Prior 항: −Π3(x − μ)
-        # simple_prior: μ = x_prior = x_prev (identity, 파라미터 없음)
-        # use_prior:    μ = prior_mu(x_prev) (MLP)
         if (self.use_prior or self.simple_prior) and x_prior is not None:
-            grad_prior = self.pi3 * (x_prior - x)
+            pi3 = _pi3 if _pi3 is not None else self.pi3
+            grad_prior = pi3 * (x_prior - x)
         else:
             grad_prior = x.new_zeros(x.shape)
 
@@ -330,21 +344,29 @@ class PRISMCell(nn.Module):
         K = K if K is not None else self.K
         x = self.x_init(u) if x0 is None else x0
 
+        # Precision 벡터 한 번만 계산 (모든 경로 공통)
+        _pi1 = self.pi1
+        _pi2 = self.pi2 if self.memory_mode != "none" else None
+        _pi3 = self.pi3 if (self.use_prior or self.simple_prior) else None
+
         if return_energies:
             energies: List[float] = []
             with torch.no_grad():
                 for _ in range(K):
                     energies.append(self.energy(x, u, mem_state, x_prior).item())
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
+                    x = x + self.alpha * self._neg_grad_E(
+                        x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
                 energies.append(self.energy(x, u, mem_state, x_prior).item())
             return x, energies
 
         if training and self.approximate_grad:
             with torch.no_grad():
                 for _ in range(K - 1):
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
+                    x = x + self.alpha * self._neg_grad_E(
+                        x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
             x = x.detach()
-            x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
+            x = x + self.alpha * self._neg_grad_E(
+                x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
             return x
 
         # 적응형 K (추론 전용): 에너지 수렴 시 조기 종료
@@ -356,13 +378,19 @@ class PRISMCell(nn.Module):
                     if k >= K_min and abs(prev_e - e) / (abs(prev_e) + 1e-8) < K_tol:
                         break
                     prev_e = e
-                    x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
+                    x = x + self.alpha * self._neg_grad_E(
+                        x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
             return x
 
         # Full backprop (기본) — raw x 공간에서 정확한 에너지 경사하강
+        # Precision 벡터를 K-loop 밖에서 한 번만 계산 (K번 반복 overhead 제거)
+        _pi1 = self.pi1
+        _pi2 = self.pi2 if self.memory_mode != "none" else None
+        _pi3 = self.pi3 if (self.use_prior or self.simple_prior) else None
         with torch.set_grad_enabled(training):
             for _ in range(K):
-                x = x + self.alpha * self._neg_grad_E(x, u, mem_state, x_prior)
+                x = x + self.alpha * self._neg_grad_E(
+                    x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
         return x
 
     def _rms(self, x: torch.Tensor) -> torch.Tensor:
