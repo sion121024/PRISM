@@ -51,11 +51,12 @@ dx/ds = −∂E/∂x   (K번 반복 = 내부 사고 깊이)
 
 | 모델 | params | 5 epoch ppl | 8 epoch ppl |
 |------|--------|------------|------------|
-| PRISM-prior-K2 | 55,452 | 14.447 | **13.649** |
-| PRISM-prior-K4 | 55,452 | (진행 예정) | — |
-| LSTM | 56,080 | 20.542 | — |
+| PRISM-prior-K2 | 55,452 | 13.601 | ✓ |
+| **PRISM-prior-K4** | **55,452** | **12.942** | ✓ |
+| LSTM | 56,080 | 14.164 | 기준 |
 
-> LSTM 대비 **6.9 ppl 우위** (8 epoch 기준, 동일 파라미터)
+- **K-effect**: K2→K4 **+0.659 ppl** (동일 파라미터, "더 많이 생각 = 더 똑똑" 증명)
+- **PRISM vs LSTM**: K4 기준 **−1.222 ppl 우위** (파라미터 628 차이, ~1% 이내)
 
 #### Stage 7: K-effect 증명 (116K params)
 
@@ -146,7 +147,7 @@ python verify_convergence.py
 - [x] **Stage 4** — 설계 정합 검증: carry gate 제거, prior 없이 K-effect 없음 확인
 - [x] **Stage 5/6** — u_rec 비선형화: 관측 증강 f([u_raw, x_prev]) 도입
 - [x] **Stage 7** — Prior 항 도입: ½‖x−μ(x_prev)‖²_Π3 → K-effect +1.765 ppl (K2→K4)
-- [x] **Stage 8** — 파라미터 매칭: PRISM 55K vs LSTM 56K, K2 기준 **13.601 vs ~20 ppl** (진행 중, K4/LSTM 대기)
+- [x] **Stage 8** — 파라미터 매칭 완료: PRISM-K4 **12.942** vs LSTM **14.164** (−1.222 ppl), K-effect +0.659 ppl
 
 ### 진행 예정
 - [ ] **Stage 9** — 적응형 K(t): 어려운 토큰에 더 많은 K-step 자동 배분
