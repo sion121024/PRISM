@@ -34,6 +34,7 @@ def verify_energy_convergence(
     model = PRISMLangModel(
         vocab_size=vocab_size, d=d, emb_dim=emb_dim,
         K=K, alpha=alpha, memory_mode=memory_mode, mem_rank=mem_rank,
+        decoder="mlp", dec_hidden=64, state_norm=False,
     ).to(device)
     model.eval()
 
@@ -45,10 +46,12 @@ def verify_energy_convergence(
 
     for trial in range(n_trials):
         tokens = torch.randint(0, vocab_size, (batch_size,), device=device)
-        u = model.embed(tokens)
+        x0 = torch.zeros(batch_size, d, device=device)
+        u_raw = model.embed(tokens)
+        u = model.u_recurrent(torch.cat([u_raw, x0], dim=-1))
         _, mem = model.cell.init_state(batch_size, device)
 
-        _, energies = model.cell.iterate(u, mem, return_energies=True, K=K)
+        _, energies = model.cell.iterate(u, mem, x0=x0, return_energies=True, K=K)
 
         monotone = all(
             energies[i] >= energies[i + 1] - 1e-6
@@ -71,9 +74,11 @@ def verify_energy_convergence(
     axes[0].grid(True, alpha=0.3)
 
     tokens = torch.randint(0, vocab_size, (batch_size,), device=device)
-    u = model.embed(tokens)
+    x0 = torch.zeros(batch_size, d, device=device)
+    u_raw = model.embed(tokens)
+    u = model.u_recurrent(torch.cat([u_raw, x0], dim=-1))
     _, mem = model.cell.init_state(batch_size, device)
-    _, energies = model.cell.iterate(u, mem, return_energies=True, K=K)
+    _, energies = model.cell.iterate(u, mem, x0=x0, return_energies=True, K=K)
     E0 = energies[0]
     normalized = [(e - energies[-1]) / (E0 - energies[-1] + 1e-8)
                   for e in energies]
