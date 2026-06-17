@@ -402,8 +402,9 @@ class PRISMCell(nn.Module):
         x0: Optional[torch.Tensor] = None,
         training: bool = True,
         x_prior: Optional[torch.Tensor] = None,
+        K: Optional[int] = None,
     ) -> Tuple[torch.Tensor, object]:
-        x_star  = self.iterate(u, mem_state, x0, training=training, x_prior=x_prior)
+        x_star  = self.iterate(u, mem_state, x0, K=K, training=training, x_prior=x_prior)
         mem_new = self.update_memory(x_star.detach(), mem_state)
         return x_star, mem_new
 

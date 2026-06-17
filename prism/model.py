@@ -7,6 +7,7 @@ PRISM 언어 모델.
 memory_mode: 'sliding' (CPU 기본) | 'full_M' (GPU 권장) | 'none'
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -105,6 +106,19 @@ class PRISMLangModel(nn.Module):
     # Forward                                                           #
     # ---------------------------------------------------------------- #
 
+    def _token_K(self, prev_logits: torch.Tensor, K_min: int, K_max: int) -> int:
+        """
+        이전 토큰 예측 엔트로피 → 현재 토큰 K 결정.
+        엔트로피 높음(불확실) = K 많이, 엔트로피 낮음(확실) = K 적게.
+        설계 이중시계: 어려운 입력일수록 내부시계가 더 많이 돈다.
+        """
+        with torch.no_grad():
+            probs = F.softmax(prev_logits, dim=-1)
+            entropy = -(probs * (probs + 1e-9).log()).sum(-1).max().item()
+            max_entropy = math.log(self.vocab_size)
+            frac = min(entropy / max_entropy, 1.0)
+            return max(K_min, min(K_max, K_min + round((K_max - K_min) * frac)))
+
     def forward(
         self,
         tokens: torch.Tensor,            # [B, T]
@@ -112,6 +126,9 @@ class PRISMLangModel(nn.Module):
         mem0=None,
         return_energies: bool = False,
         tbptt_window: int = 0,
+        adaptive_K: bool = False,
+        K_min: int = 1,
+        K_max: Optional[int] = None,
     ) -> Dict[str, Any]:
         B, T = tokens.shape
         device = tokens.device
@@ -125,6 +142,10 @@ class PRISMLangModel(nn.Module):
         is_training = self.training
         all_x: List[torch.Tensor] = []
         all_energies: List[List[float]] = []
+        all_k_used: List[int] = []
+
+        _K_max = K_max if K_max is not None else self.cell.K * 2
+        prev_logits: Optional[torch.Tensor] = None  # 적응형 K용 이전 예측
 
         # Pre-embed all input tokens in one batched call
         u_all = self.embed(tokens[:, :-1])  # [B, T-1, emb_dim]
@@ -135,6 +156,12 @@ class PRISMLangModel(nn.Module):
                 u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
             else:
                 u = u_raw
+
+            # 적응형 K: 이전 토큰 예측 엔트로피로 현재 K 결정
+            if adaptive_K and not is_training and prev_logits is not None:
+                k_t = self._token_K(prev_logits, K_min, _K_max)
+            else:
+                k_t = None  # cell 기본값 사용
 
             if return_energies:
                 x_new, energies_t = self.cell.iterate(
@@ -149,15 +176,19 @@ class PRISMLangModel(nn.Module):
                 mem = self.cell.update_memory(x_star.detach(), mem)
                 x = x_star
             else:
-                # prior 항: μ = prior_mu(x_prev) — 에너지 내부 상태 전이
                 x_prior = self.cell.prior_mu(x) if self.use_prior else None
-                x, mem = self.cell(u, mem, x, training=is_training, x_prior=x_prior)
-                if self.carry_nonlin:  # 하위호환용 (설계 비정합)
+                x, mem = self.cell(u, mem, x, training=is_training,
+                                   x_prior=x_prior, K=k_t)
+                if self.carry_nonlin:
                     x = self.carry_ln(x + self.carry_gate(x))
                 else:
-                    # 토큰 간 상태 정규화 (파라미터 없음, 표현 스케일 고정)
                     rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
                     x = x * rms
+
+            # 다음 토큰 K 결정을 위해 현재 logits 저장
+            if adaptive_K and not is_training:
+                prev_logits = self.output_proj(x.detach())
+                all_k_used.append(k_t if k_t is not None else self.cell.K)
 
             all_x.append(x)
 
@@ -177,6 +208,8 @@ class PRISMLangModel(nn.Module):
         result: Dict[str, Any] = {'loss': loss, 'logits': logits_all}
         if return_energies:
             result['energies'] = all_energies
+        if all_k_used:
+            result['k_used'] = all_k_used
         return result
 
     # ---------------------------------------------------------------- #
