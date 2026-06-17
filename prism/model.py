@@ -49,6 +49,7 @@ class PRISMLangModel(nn.Module):
         state_norm: Optional[bool] = None,
         use_prior: bool = False,
         use_urec: bool = True,
+        simple_prior: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -56,6 +57,7 @@ class PRISMLangModel(nn.Module):
         self.emb_dim = emb_dim
         self.use_deq = use_deq
         self.use_prior = use_prior
+        self.simple_prior = simple_prior
         self.use_urec = use_urec
 
         self.embed = nn.Embedding(vocab_size, emb_dim)
@@ -71,6 +73,7 @@ class PRISMLangModel(nn.Module):
             mem_scale=mem_scale,
             state_norm=state_norm,
             use_prior=use_prior,
+            simple_prior=simple_prior,
         )
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
@@ -176,7 +179,12 @@ class PRISMLangModel(nn.Module):
                 mem = self.cell.update_memory(x_star.detach(), mem)
                 x = x_star
             else:
-                x_prior = self.cell.prior_mu(x) if self.use_prior else None
+                if self.simple_prior:
+                    x_prior = x  # identity prior: μ = x_prev (파라미터 없음)
+                elif self.use_prior:
+                    x_prior = self.cell.prior_mu(x)
+                else:
+                    x_prior = None
                 x, mem = self.cell(u, mem, x, training=is_training,
                                    x_prior=x_prior, K=k_t)
                 if self.carry_nonlin:
@@ -235,7 +243,7 @@ class PRISMLangModel(nn.Module):
                 u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
             else:
                 u = u_raw
-            x_prior = self.cell.prior_mu(x) if self.use_prior else None
+            x_prior = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
             mem = self.cell.update_memory(x, mem)
             rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
@@ -256,7 +264,7 @@ class PRISMLangModel(nn.Module):
                 u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
             else:
                 u = u_raw
-            x_prior = self.cell.prior_mu(x) if self.use_prior else None
+            x_prior = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
             mem = self.cell.update_memory(x, mem)
             rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()

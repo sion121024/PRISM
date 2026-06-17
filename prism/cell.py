@@ -117,6 +117,7 @@ class PRISMCell(nn.Module):
         state_norm: Optional[bool] = None,
         mem_scale: float = 1.0,
         use_prior: bool = False,
+        simple_prior: bool = False,  # True → μ = x_prev (파라미터 없는 identity prior)
     ):
         super().__init__()
         assert memory_mode in ("sliding", "full_M", "none")
@@ -158,13 +159,16 @@ class PRISMCell(nn.Module):
         self.log_pi2 = nn.Parameter(torch.zeros(d))
 
         # Prior 항: ½‖x − μ(x_prev)‖²_Π3
-        # 에너지 내부 상태 전이 — carry gate의 설계 정합 대체
-        if use_prior:
+        # simple_prior=True: μ = x_prev (identity, 파라미터 없음) ← 단순하고 빠름
+        # use_prior=True:    μ = MLP(x_prev) (학습, +18K params)  ← 더 표현력 있음
+        self.simple_prior = simple_prior
+        if use_prior and not simple_prior:
             self.prior_mu = nn.Sequential(
                 nn.Linear(d, d // 4),
                 nn.GELU(),
                 nn.Linear(d // 4, d),
             )
+        if use_prior or simple_prior:
             self.log_pi3 = nn.Parameter(torch.zeros(d))
 
         # 초기 상태 인코더
@@ -219,7 +223,7 @@ class PRISMCell(nn.Module):
 
     @property
     def pi3(self) -> torch.Tensor:
-        return F.softplus(self.log_pi3) if self.use_prior else None  # [d]
+        return F.softplus(self.log_pi3) if (self.use_prior or self.simple_prior) else None  # [d]
 
     # ---------------------------------------------------------------- #
     # M 연산                                                            #
@@ -265,8 +269,10 @@ class PRISMCell(nn.Module):
         else:
             grad_mem = x.new_zeros(x.shape)
 
-        # Prior 항: −Π3(x − μ(x_prev))   → x를 에너지 내에서 prior 방향으로 당김
-        if self.use_prior and x_prior is not None:
+        # Prior 항: −Π3(x − μ)
+        # simple_prior: μ = x_prior = x_prev (identity, 파라미터 없음)
+        # use_prior:    μ = prior_mu(x_prev) (MLP)
+        if (self.use_prior or self.simple_prior) and x_prior is not None:
             grad_prior = self.pi3 * (x_prior - x)
         else:
             grad_prior = x.new_zeros(x.shape)
