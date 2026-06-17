@@ -47,6 +47,7 @@ class PRISMLangModel(nn.Module):
         carry_nonlin: bool = False,
         state_norm: Optional[bool] = None,
         use_prior: bool = False,
+        use_urec: bool = True,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -54,6 +55,7 @@ class PRISMLangModel(nn.Module):
         self.emb_dim = emb_dim
         self.use_deq = use_deq
         self.use_prior = use_prior
+        self.use_urec = use_urec
 
         self.embed = nn.Embedding(vocab_size, emb_dim)
         self.cell = PRISMCell(
@@ -71,12 +73,11 @@ class PRISMLangModel(nn.Module):
         )
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
-        # 설계 정합 순환: ũ = f([u, x_prev]) → 에너지의 관측값 u를 풍부하게 만듦.
-        # E(x) = ½‖ũ − g(x)‖²_Π1 + ...  (에너지 내부 순환 의존성)
-        # Active Inference에서 인식 모델(recognition model)이 감각 전처리하는 것과 동일.
-        # carry gate(에너지 밖 변환) 대신 이 방식 사용.
-        self.u_rec1 = nn.Linear(d + emb_dim, emb_dim)   # 비선형 감각 전처리
-        self.u_rec2 = nn.Linear(emb_dim, emb_dim, bias=False)
+        if use_urec:
+            # 설계 정합 순환: ũ = f([u, x_prev]) → 에너지 관측값 u를 풍부하게.
+            # carry gate(에너지 밖 변환) 대신 사용.
+            self.u_rec1 = nn.Linear(d + emb_dim, emb_dim)
+            self.u_rec2 = nn.Linear(emb_dim, emb_dim, bias=False)
 
         self.carry_nonlin = carry_nonlin
         if carry_nonlin:
@@ -130,9 +131,10 @@ class PRISMLangModel(nn.Module):
 
         for t in range(T - 1):
             u_raw = u_all[:, t]
-            # 설계 정합 순환: 이전 상태 x를 관측값 u에 합산
-            # ũ = W_rec([u, x_prev]) — 에너지 내부에서 순환 의존성 표현
-            u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+            if self.use_urec:
+                u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+            else:
+                u = u_raw
 
             if return_energies:
                 x_new, energies_t = self.cell.iterate(
@@ -196,7 +198,10 @@ class PRISMLangModel(nn.Module):
 
         for tok in prompt.unbind(1):
             u_raw = self.embed(tok)
-            u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+            if self.use_urec:
+                u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+            else:
+                u = u_raw
             x_prior = self.cell.prior_mu(x) if self.use_prior else None
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
             mem = self.cell.update_memory(x, mem)
@@ -214,7 +219,10 @@ class PRISMLangModel(nn.Module):
             for b in range(B):
                 generated[b].append(next_tok[b].item())
             u_raw = self.embed(next_tok)
-            u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+            if self.use_urec:
+                u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+            else:
+                u = u_raw
             x_prior = self.cell.prior_mu(x) if self.use_prior else None
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
             mem = self.cell.update_memory(x, mem)

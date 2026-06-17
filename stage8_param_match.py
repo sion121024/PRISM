@@ -68,7 +68,7 @@ def train_one(model, train_loader, val_loader, args, name):
 
 
 def make_prism_matched(vocab_size, d, emb_dim, K, alpha, dec_hidden, mem_rank=16, mem_scale=4.0):
-    """파라미터 매칭 PRISM: carry gate 없음, prior 항, state_norm."""
+    """파라미터 매칭 PRISM: carry gate 없음, prior 항, u_rec 없음 (~54K)."""
     return PRISMLangModel(
         vocab_size=vocab_size, d=d, emb_dim=emb_dim,
         K=K, alpha=alpha, memory_mode="sliding",
@@ -77,6 +77,7 @@ def make_prism_matched(vocab_size, d, emb_dim, K, alpha, dec_hidden, mem_rank=16
         carry_nonlin=False,
         state_norm=False,
         use_prior=True,
+        use_urec=False,
     )
 
 
