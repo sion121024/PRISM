@@ -278,7 +278,16 @@ class PRISMCell(nn.Module):
         K: Optional[int] = None,
         return_energies: bool = False,
         training: bool = False,
+        adaptive: bool = False,
+        K_min: int = 1,
+        K_tol: float = 1e-4,
     ):
+        """
+        내부시계 s: K번 에너지 하강.
+
+        adaptive=True (추론 전용): 에너지가 K_tol 이하로 수렴하면 조기 종료.
+        이중시계 설계 — K(t) per-token 적응형 사고 깊이.
+        """
         K = K if K is not None else self.K
         x = self.x_init(u) if x0 is None else x0
 
@@ -292,12 +301,24 @@ class PRISMCell(nn.Module):
             return self._rms(x), energies
 
         if training and self.approximate_grad:
-            # K-1 no_grad + 1 grad (근사 backward)
             with torch.no_grad():
                 for _ in range(K - 1):
                     x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
             x = x.detach()
             x = x + self.alpha * self._neg_grad_E(self._rms(x), u, mem_state)
+            return self._rms(x)
+
+        # 적응형 K (추론 전용): 에너지 수렴 시 조기 종료
+        if adaptive and not training:
+            with torch.no_grad():
+                prev_e = float('inf')
+                for k in range(K):
+                    x_n = self._rms(x)
+                    e = self.energy(x_n, u, mem_state).item()
+                    if k >= K_min and abs(prev_e - e) / (abs(prev_e) + 1e-8) < K_tol:
+                        break
+                    prev_e = e
+                    x = x + self.alpha * self._neg_grad_E(x_n, u, mem_state)
             return self._rms(x)
 
         # Full backprop (기본)

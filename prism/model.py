@@ -70,7 +70,7 @@ class PRISMLangModel(nn.Module):
 
         self.carry_nonlin = carry_nonlin
         if carry_nonlin:
-            # nonlinear state carry between tokens (direction 3)
+            # carry gate는 하위호환용으로만 유지 (설계 비정합, 신규 코드에서 사용 금지)
             self.carry_gate = nn.Sequential(
                 nn.Linear(d, d // 4),
                 nn.GELU(),
