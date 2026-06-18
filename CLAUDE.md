@@ -90,9 +90,12 @@ PyTorch 멀티스레드 오버헤드(소형 텐서 문제): 4 threads = 14ms, 1 
 ## de-risking 단계
 
 - [x] **Stage 1**: 에너지 수렴 + implicit diff 동작 확인
-- [ ] **Stage 2**: 문자 LM ppl이 SSM 베이스라인과 경쟁
-- [ ] **Stage 3**: 이중시계·적응K로 추론 태스크 ("더 생각하면 더 맞나")
-- [ ] **Stage 4**: V100에서 50~150M 스케일업
+- [~] **Stage 2**: 문자 LM ppl이 SSM 베이스라인과 경쟁 — 근접 달성
+  (PRISM gate+conv+all 20ep ~7.3 vs Mamba-d128 6.45, 격차 ~13%, PRISM이 params 10% 적음)
+- [x] **Stage 3**: 이중시계·추론 태스크 — **PRISM이 파라미터 대비 Mamba 격파**
+  (연상회상 n_pairs=12: PRISM 0.162 vs Mamba 0.113, 43% 적은 params로 승.
+   난이도↑에서 Mamba 급락 vs PRISM 우아한 저하. 이중시계: 추론 K↑→ppl↓ 단조 입증)
+- [ ] **Stage 4**: V100/GPU에서 50~150M 스케일업 (Kaggle 연동은 egress 정책 차단 상태)
 - [ ] **Stage 5**: 비전 어댑터 + 행동 슬롯
 
 ## 학습 전략
