@@ -180,6 +180,8 @@ python verify_convergence.py
 | `momentum` | 0.0 | K-step Heavy-ball β (0.9 권장, 0=끔) |
 | `use_conv` | False | Depthwise conv1d n-gram 패턴 캡처 (+320 params, Mamba 유사체) |
 | `d_conv` | 4 | conv1d 커널 크기 |
+| `use_gate` | False | Z-gate: x = x × SiLU(W_z·u) — Mamba y×SiLU(z) 유사체 (+10,920 params) |
+| `use_bypass` | False | n-gram 단축로: logits += W_bypass·u_conv (+4,160 params) |
 
 ### Selective PRISM: input_dep_pi
 
@@ -213,6 +215,30 @@ char LM에서 "th"→"e", "ing", "tion" 같은 로컬 n-gram 패턴을 효율적
 - 학습: vectorized `Conv1d(emb_dim, emb_dim, k=4, groups=emb_dim)` — 전체 시퀀스 일괄처리
 - 생성: 순차 conv buffer — 마지막 d_conv 토큰 유지
 - 추가 파라미터: `emb_dim × d_conv + emb_dim = 64 × 4 + 64 = 320` (매우 저렴)
+
+### Z-Gate: use_gate
+
+Mamba의 `y × SiLU(z)` 게이팅 메커니즘의 PRISM 유사체.
+
+```
+x = x × SiLU(W_gate · u_raw)  — 입력이 상태의 어떤 차원을 열고/닫을지 선택
+```
+
+- `gate_proj`: `Linear(emb_dim, d)`, bias initialized to 1.278 → SiLU(1.278) ≈ 1.0 (초기 identity)
+- K-step 이후, RMS normalize 이전에 적용
+- 추가 파라미터: `emb_dim × d + d = 64 × 168 + 168 = 10,920`
+
+### N-gram Bypass: use_bypass
+
+에너지 상태 독립적인 n-gram 단축로. 로컬 패턴을 직접 예측 분포에 기여.
+
+```
+logits = output_proj(norm_f(x)) + bypass_proj(u_all)  — u_all은 conv처리된 임베딩
+```
+
+- `bypass_proj`: `Linear(emb_dim, vocab_size)`, zeros init → 학습 전 효과 없음
+- use_conv=True와 함께 사용 시 4-gram 컨텍스트를 직접 어휘 분포에 매핑
+- 추가 파라미터: `emb_dim × vocab_size = 64 × 65 = 4,160`
 
 ---
 
