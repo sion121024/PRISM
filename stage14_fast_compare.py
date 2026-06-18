@@ -5,13 +5,16 @@ Stage 14: 빠른 비교 — 누적된 모든 개선사항 통합 효과 검증
   1. input_dep_pi=True  — Π1(u), Π2(u) 선택적 precision (Mamba 유사체)
   2. prior_bias=True    — μ = x_prev + b (빠른 수렴)
   3. momentum=0.9      — Heavy-ball K-step (빠른 수렴)
+  4. use_conv=True      — Depthwise conv1d: 로컬 n-gram 패턴 (+320 params, Mamba 유사체)
 
 비교:
-  A) slim-K4         : 기준 (모든 기능 off)
-  B) slim+sel-K4     : input_dep_pi only
-  C) slim+mom-K4     : momentum=0.9 only
-  D) slim+all-K4     : input_dep_pi + prior_bias + momentum
-  E) Mamba           : 참조
+  A) slim-K4             : 기준 (모든 기능 off)
+  B) slim+sel-K4         : input_dep_pi only
+  C) slim+mom-K4         : momentum=0.9 only
+  D) slim+all-K4         : input_dep_pi + prior_bias + momentum
+  E) slim+conv-K4        : use_conv only
+  F) slim+conv+all-K4    : 전체 (conv + sel + mom + prior_bias)
+  G) Mamba               : 참조
 
 5 epoch (신호 충분, 런타임 합리적).
 """
@@ -115,12 +118,23 @@ def main():
         make_prism(vocab_size, momentum=0.9),
         train_loader, val_loader, args, "slim+mom-K4")
 
-    # D) 모든 기능 활성화
+    # D) 모든 기능 활성화 (conv 제외)
     results["slim+all-K4"] = train_one(
         make_prism(vocab_size, input_dep_pi=True, prior_bias=True, momentum=0.9),
         train_loader, val_loader, args, "slim+all-K4")
 
-    # E) Mamba: 참조
+    # E) conv only: 로컬 n-gram 패턴 캡처 (Mamba conv1d 유사체, +320 params)
+    results["slim+conv-K4"] = train_one(
+        make_prism(vocab_size, use_conv=True),
+        train_loader, val_loader, args, "slim+conv-K4")
+
+    # F) 전체 누적: conv + sel + mom + prior_bias
+    results["slim+conv+all-K4"] = train_one(
+        make_prism(vocab_size, use_conv=True, input_dep_pi=True,
+                   prior_bias=True, momentum=0.9),
+        train_loader, val_loader, args, "slim+conv+all-K4")
+
+    # G) Mamba: 참조
     if not args.skip_mamba:
         mamba = MambaLangModel(vocab_size=vocab_size, d_model=80, d_state=8)
         results["Mamba"] = train_one(mamba, train_loader, val_loader, args, "Mamba")
@@ -129,21 +143,22 @@ def main():
     print("Stage 14: 누적 개선 효과 (낮을수록 좋음)")
     print("=" * 64)
     for name, (ppl, n) in results.items():
-        print(f"  {name:<22s}: val_ppl {ppl:.3f}  ({n:,} params)")
+        print(f"  {name:<26s}: val_ppl {ppl:.3f}  ({n:,} params)")
 
     base = results.get("slim-K4", (None,))[0]
     if base:
-        for name in ["slim+sel-K4", "slim+mom-K4", "slim+all-K4"]:
+        for name in ["slim+sel-K4", "slim+mom-K4", "slim+all-K4",
+                     "slim+conv-K4", "slim+conv+all-K4"]:
             if name in results:
                 diff = base - results[name][0]
                 print(f"  {name} vs 기준: {diff:+.3f} ppl")
         if "Mamba" in results:
             print(f"\n  기준 vs Mamba: {base - results['Mamba'][0]:+.3f} ppl")
-            if "slim+all-K4" in results:
-                all_ppl = results["slim+all-K4"][0]
+            if "slim+conv+all-K4" in results:
+                all_ppl = results["slim+conv+all-K4"][0]
                 closed = base - all_ppl
                 total_gap = base - results["Mamba"][0]
-                print(f"  slim+all 격차 감소: {closed:+.3f} ppl ({100*closed/abs(total_gap):.1f}% of gap)")
+                print(f"  slim+conv+all 격차 감소: {closed:+.3f} ppl ({100*closed/abs(total_gap):.1f}% of gap)")
 
 
 if __name__ == "__main__":

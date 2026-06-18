@@ -53,6 +53,8 @@ class PRISMLangModel(nn.Module):
         prior_bias: bool = False,
         input_dep_pi: bool = False,
         momentum: float = 0.0,
+        use_conv: bool = False,
+        d_conv: int = 4,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -62,6 +64,8 @@ class PRISMLangModel(nn.Module):
         self.use_prior = use_prior
         self.simple_prior = simple_prior
         self.use_urec = use_urec
+        self.use_conv = use_conv
+        self.d_conv = d_conv
 
         self.embed = nn.Embedding(vocab_size, emb_dim)
         self.cell = PRISMCell(
@@ -83,6 +87,14 @@ class PRISMLangModel(nn.Module):
         )
         self.norm_f = nn.LayerNorm(d)       # Mamba/GPT-2 style pre-unembed norm
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
+
+        if use_conv:
+            # 로컬 패턴 캡처: Mamba conv1d 유사체 (depthwise, causal)
+            # char LM에서 "th"→"e", "ing" 등 n-gram 패턴 효율 포착
+            self.conv_1d = nn.Conv1d(
+                emb_dim, emb_dim, kernel_size=d_conv,
+                padding=d_conv - 1, groups=emb_dim, bias=True,
+            )
 
         if use_urec:
             # 설계 정합 순환: ũ = f([u, x_prev]) → 에너지 관측값 u를 풍부하게.
@@ -159,6 +171,11 @@ class PRISMLangModel(nn.Module):
 
         # Pre-embed all input tokens in one batched call
         u_all = self.embed(tokens[:, :-1])  # [B, T-1, emb_dim]
+        if self.use_conv:
+            # Causal depthwise conv1d: 로컬 n-gram 패턴 캡처 (Mamba 유사체)
+            u_t = u_all.transpose(1, 2)                # [B, emb_dim, T-1]
+            u_t = self.conv_1d(u_t)[:, :, :T - 1]     # causal: 앞 T-1만
+            u_all = F.silu(u_t.transpose(1, 2))        # [B, T-1, emb_dim]
 
         for t in range(T - 1):
             u_raw = u_all[:, t]
@@ -243,9 +260,18 @@ class PRISMLangModel(nn.Module):
         B = prompt.shape[0]
         device = prompt.device
         x, mem = self.init_state(B, device)
+        # conv buffer: 마지막 d_conv 토큰 임베딩 (순차 생성용)
+        conv_buf = x.new_zeros(B, self.emb_dim, self.d_conv) if self.use_conv else None
+
+        def _apply_conv(u_raw, buf):
+            buf = torch.cat([buf[:, :, 1:], u_raw.unsqueeze(-1)], dim=-1)
+            u_c = (self.conv_1d.weight.squeeze(1) * buf).sum(-1) + self.conv_1d.bias
+            return F.silu(u_c), buf
 
         for tok in prompt.unbind(1):
             u_raw = self.embed(tok)
+            if self.use_conv:
+                u_raw, conv_buf = _apply_conv(u_raw, conv_buf)
             if self.use_urec:
                 u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
             else:
@@ -267,6 +293,8 @@ class PRISMLangModel(nn.Module):
             for b in range(B):
                 generated[b].append(next_tok[b].item())
             u_raw = self.embed(next_tok)
+            if self.use_conv:
+                u_raw, conv_buf = _apply_conv(u_raw, conv_buf)
             if self.use_urec:
                 u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
             else:
