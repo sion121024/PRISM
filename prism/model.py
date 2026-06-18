@@ -55,6 +55,7 @@ class PRISMLangModel(nn.Module):
         momentum: float = 0.0,
         use_conv: bool = False,
         d_conv: int = 4,
+        use_gate: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -66,6 +67,7 @@ class PRISMLangModel(nn.Module):
         self.use_urec = use_urec
         self.use_conv = use_conv
         self.d_conv = d_conv
+        self.use_gate = use_gate
 
         self.embed = nn.Embedding(vocab_size, emb_dim)
         self.cell = PRISMCell(
@@ -95,6 +97,14 @@ class PRISMLangModel(nn.Module):
                 emb_dim, emb_dim, kernel_size=d_conv,
                 padding=d_conv - 1, groups=emb_dim, bias=True,
             )
+
+        if use_gate:
+            # Z-gate: x = x × SiLU(W_z u)  —  Mamba 의 y × SiLU(z) 유사체
+            # 입력이 현재 상태의 어떤 차원을 열고/닫을지 선택.
+            # bias=1.278 → SiLU(1.278) ≈ 1.0, 초기에 identity-like.
+            self.gate_proj = nn.Linear(emb_dim, d)
+            nn.init.zeros_(self.gate_proj.weight)
+            nn.init.constant_(self.gate_proj.bias, 1.278)
 
         if use_urec:
             # 설계 정합 순환: ũ = f([u, x_prev]) → 에너지 관측값 u를 풍부하게.
@@ -211,6 +221,8 @@ class PRISMLangModel(nn.Module):
                     x_prior = None
                 x, mem = self.cell(u, mem, x, training=is_training,
                                    x_prior=x_prior, K=k_t)
+                if self.use_gate:
+                    x = x * F.silu(self.gate_proj(u_raw))
                 if self.carry_nonlin:
                     x = self.carry_ln(x + self.carry_gate(x))
                 else:
@@ -278,6 +290,8 @@ class PRISMLangModel(nn.Module):
                 u = u_raw
             x_prior = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
+            if self.use_gate:
+                x = x * F.silu(self.gate_proj(u_raw))
             mem = self.cell.update_memory(x, mem)
             rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
             x = x * rms
@@ -301,6 +315,8 @@ class PRISMLangModel(nn.Module):
                 u = u_raw
             x_prior = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
             x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
+            if self.use_gate:
+                x = x * F.silu(self.gate_proj(u_raw))
             mem = self.cell.update_memory(x, mem)
             rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
             x = x * rms
