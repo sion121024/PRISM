@@ -222,9 +222,13 @@ class PRISMLangModel(nn.Module):
                 x = x_new
                 all_energies.append(energies_t)
             elif self.use_deq:
-                params = list(self.cell.parameters())
-                F_fn = lambda z: z + self.cell.alpha * self.cell.neg_grad_E(z, u, mem)
-                x_star, _ = self.deq(F_fn, x, params)
+                x_prior_d = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
+                F_fn = lambda z: z + self.cell.alpha * self.cell._neg_grad_E(z, u, mem, x_prior=x_prior_d)
+                x_star, _ = self.deq(F_fn, x, list(self.cell.parameters()))
+                if self.use_gate:
+                    x_star = x_star * F.silu(self.gate_proj(u_raw))
+                rms = x_star.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+                x_star = x_star * rms
                 mem = self.cell.update_memory(x_star.detach(), mem)
                 x = x_star
             else:
