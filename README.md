@@ -60,6 +60,18 @@ dx/ds = −∂E/∂x   (K번 반복 = 내부 사고 깊이)
 - **핵심 발견**: Mamba conv1d가 즉시 로컬 n-gram 패턴 포착; PRISM은 Hebbian 기억 충전에 수 epoch 필요
 - **동기**: `use_conv=True` 추가 → PRISM도 epoch 1부터 로컬 패턴 학습 가능 (단 320 params)
 
+#### Stage 14: 누적 개선사항 ablation (5 epochs, norm_f 포함)
+
+| 모델 | params | 5 epoch BEST ppl | 비고 |
+|------|--------|-----------------|------|
+| slim-K4 (기준) | 55,594 | 28.156 | 5 epoch 내내 flat |
+| slim+sel-K4 | 70,674 | **26.070** | input_dep_pi: 후반부 급격 개선 |
+| slim+mom-K4 | 55,594 | 28.103 | momentum 단독: 효과 미미 |
+| slim+all-K4 | 70,842 | (진행 중) | sel+mom+prior_bias 조합 |
+| slim+conv-K4 | 55,914 | (진행 중) | **핵심 테스트**: conv 단독 효과 |
+| slim+conv+all-K4 | 71,162 | (진행 중) | conv+sel+mom+prior_bias 전체 |
+| Mamba (참조) | 54,400 | (진행 중) | ~7.85 예상 |
+
 #### Stage 10: 단순화 실험 (simple_prior vs prior_mu MLP)
 
 | 모델 | prior | params | BEST ppl |
