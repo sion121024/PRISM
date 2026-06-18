@@ -102,26 +102,29 @@ dx/ds = −∂E/∂x   (K번 반복 = 내부 사고 깊이)
 prism/
   cell.py           # PRISMCell — 에너지 함수, 그래디언트, K-step
   deq.py            # DEQ 솔버 (Anderson acceleration)
-  model.py          # PRISMLangModel — 전체 언어 모델 (adaptive K, simple_prior)
-  multimodal.py     # PRISMMultimodalModel — 멀티모달 확장 (시각 에너지 항)
+  model.py          # PRISMLangModel — 전체 언어 모델
+  multimodal.py     # PRISMMultimodalModel — 멀티모달 확장
 tasks/
   char_lm.py        # TinyShakespeare (문자 LM)
   copy_task.py
   assoc_recall.py
 baselines/
   lstm_lm.py
-  mamba_lm.py       # Mamba (S6 선택적 SSM, 순수 PyTorch)
-stage3_ablation.py     # 비대칭 Hebbian + carry gate ablation
-stage4_design.py       # 설계 정합 검증 (prior 없음 → K-effect 없음)
-stage7_prior.py        # Prior 항 추가 → K-effect 실증
-stage8_param_match.py  # 파라미터 매칭 최종 비교 (55K vs 56K)
-stage9_mamba_compare.py   # Mamba 비교 (6.6 ppl vs PRISM 14.5 ppl)
-stage10_slim.py           # 단순화: simple_prior + larger d (진행 중)
-stage11_adaptive_k.py     # 적응형 K(t) 실측: 엔트로피 기반 K 선택
-stage12_gap_analysis.py   # Mamba 격차 원인 분석 (K↑, context↑, rank↑)
-verify_adaptive_k.py   # 적응형 K(t): 에너지 수렴 기반 조기 종료
-verify_convergence.py  # 에너지 수렴 확인 (Stage 1)
-verify_multimodal.py   # 멀티모달 학습 검증 (숫자 캡셔닝)
+  mamba_lm.py       # Mamba (S6, 순수 PyTorch)
+stage3_ablation.py       # 비대칭 Hebbian + carry gate ablation
+stage4_design.py         # 설계 정합 검증
+stage7_prior.py          # Prior K-effect 실증
+stage8_param_match.py    # 파라미터 매칭 최종 비교 (55K)
+stage9_mamba_compare.py  # Mamba 첫 비교
+stage10_slim.py          # 단순화: simple_prior
+stage10c_prior_bias.py   # prior_bias 효과 검증
+stage11_adaptive_k.py    # 적응형 K(t) 실측
+stage12_gap_analysis.py  # Mamba 격차: K↑, rank↑ 효과
+stage13_selective_pi.py  # Selective PRISM: Π(u) vs const Π
+stage14_fast_compare.py  # 전체 개선사항 ablation (5 epoch 신호)
+verify_adaptive_k.py
+verify_convergence.py
+verify_multimodal.py
 ```
 
 ---
@@ -154,9 +157,33 @@ python verify_convergence.py
 | `alpha` | 0.05 | 내부 스텝 크기 |
 | `mem_scale` | 4.0 | Hebbian 메모리 강도 |
 | `mem_rank` | 32 | 슬라이딩 메모리 rank |
-| `use_prior` | False | Prior 항 (학습 MLP μ(x_prev)) |
-| `simple_prior` | True | Identity prior (μ = x_prev, 파라미터 없음) |
-| `use_urec` | True | 관측 증강 (u_rec: 입력+이전상태 융합, 필수) |
+| `use_prior` | False | Prior 항 (학습 MLP μ(x_prev), +18K params) |
+| `simple_prior` | True | Identity prior (μ = x_prev, 0 params) |
+| `prior_bias` | False | Biased prior: μ = x_prev + b (+d params, 빠른 수렴) |
+| `use_urec` | True | 관측 증강 ũ = f([u_raw, x_prev]) (필수) |
+| `input_dep_pi` | False | 선택적 precision Π1(u), Π2(u) — Mamba 유사체 |
+| `momentum` | 0.0 | K-step Heavy-ball β (0.9 권장, 0=끔) |
+
+### Selective PRISM: input_dep_pi
+
+PRISM의 고정 precision (Π1, Π2) → 입력 의존 precision Π1(u), Π2(u).
+
+| 설계 | Mamba | PRISM (Selective) |
+|------|-------|-------------------|
+| 선택적 입력 통합 | B(x_t) ∈ ℝ^(d×N) | Π1(u) ∈ ℝ^emb — 지각 가중치 |
+| 선택적 메모리 읽기 | C(x_t) ∈ ℝ^(N×d) | Π2(u) ∈ ℝ^d — 기억 precision |
+| 추가 파라미터 | — | emb² + emb×d ≈ +15K |
+
+```python
+# 기준: 고정 precision (모든 토큰 동일 가중치)
+m = PRISMLangModel(..., input_dep_pi=False)
+
+# Selective PRISM: Mamba 유사 선택적 처리
+m = PRISMLangModel(..., input_dep_pi=True)
+
+# K-step Heavy-ball 추가 (파라미터 0 추가)
+m = PRISMLangModel(..., input_dep_pi=True, momentum=0.9)
+```
 
 ---
 
@@ -176,6 +203,7 @@ python verify_convergence.py
 
 ### 진행 예정
 - [ ] **Stage 11** — 적응형 K(t) 실측: 엔트로피 기반 K 선택 vs 고정 K 비교
-- [ ] **Stage 12** — Mamba 격차 원인 분석: K↑, block_size↑, mem_rank↑ 효과 측정
-- [ ] **Stage 13** — V100 스케일업: 50~150M params
-- [ ] **Stage 14** — 행동 슬롯: 연속 행동 공간 (게임/로봇 제어)
+- [ ] **Stage 12** — Mamba 격차 분석 진행 중: K=8 빠른 수렴 확인 (K4 대비 4× 빠른 개선)
+- [ ] **Stage 13** — Selective PRISM 검증: Π(u) vs const Π, 파라미터 매칭 비교
+- [ ] **Stage 14** — 전체 개선사항 ablation: input_dep_pi + momentum + norm_f + prior_bias
+- [ ] **Stage V** — GPU 스케일업: 50~150M params (V100)
