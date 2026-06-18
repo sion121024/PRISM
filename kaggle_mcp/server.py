@@ -158,7 +158,7 @@ def kaggle_status() -> str:
     """PRISM 실험 커널의 현재 실행 상태를 반환."""
     api = _api()
     try:
-        s = api.kernels_status(USERNAME, KERNEL_SLUG)
+        s = api.kernels_status(KERNEL_ID)
         status = getattr(s, 'status', str(s))
         err = getattr(s, 'failureMessage', None)
         return f"Status: {status}" + (f"\nError: {err}" if err else "")
@@ -177,7 +177,7 @@ def kaggle_logs(tail: int = 150) -> str:
     api = _api()
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            api.kernels_output(USERNAME, KERNEL_SLUG, path=tmp, quiet=True)
+            api.kernels_output(KERNEL_ID, path=tmp, quiet=True)
             out = Path(tmp) / "output.txt"
             if out.exists():
                 lines = out.read_text().splitlines()
@@ -199,7 +199,7 @@ def kaggle_output(local_path: str = "/tmp/kaggle_output") -> str:
     out_dir = Path(local_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
-        api.kernels_output(USERNAME, KERNEL_SLUG, path=str(out_dir), quiet=True)
+        api.kernels_output(KERNEL_ID, path=str(out_dir), quiet=True)
         files = list(out_dir.iterdir())
         result = f"Downloaded {len(files)} file(s) → {out_dir}\n"
         result += "\n".join(f"  {f.name} ({f.stat().st_size:,} B)" for f in files)

@@ -11,7 +11,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, List, Dict, Any
 
 from .cell import PRISMCell
 from .deq import DEQSolver
@@ -22,10 +22,11 @@ class PRISMLangModel(nn.Module):
     PRISM 언어 모델.
 
     처리 흐름 (토큰 t마다):
-      1. u_t = Embed(s_t)
-      2. x_t* = iterate(u_t, mem_{t-1}, x_{t-1})  [내부 K회]
-      3. mem_t = update_memory(x_t*)                [Hebbian]
-      4. logits = Unembed(x_t*)
+      1. u_t = Embed(s_t)                              [optional: conv + urec]
+      2. x_t* = iterate(u_t, mem_{t-1}, x_{t-1})      [내부 K회 에너지 하강]
+      3. mem_t = update_memory(x_t*)                   [Hebbian 빠른가중치]
+      4. h = norm_f(x_t*) [* gate(u)]                 [readout, gate는 상태 수정 없음]
+      5. logits = output_proj(h)
     """
 
     def __init__(
@@ -55,9 +56,9 @@ class PRISMLangModel(nn.Module):
         momentum: float = 0.0,
         use_conv: bool = False,
         d_conv: int = 4,
-        use_gate: bool = False,
-        use_bypass: bool = False,
-        use_compile: bool = False,  # torch.compile로 cell.iterate 퓨전 (PyTorch 2.0+)
+        use_gate: bool = False,  # readout-only gate: h = norm(x) * SiLU(W_g u)
+        use_compile: bool = False,
+        n_layers: int = 1,       # 계층적 예측 코딩 레이어 수 (>1 → 다층 PRISM)
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -70,7 +71,7 @@ class PRISMLangModel(nn.Module):
         self.use_conv = use_conv
         self.d_conv = d_conv
         self.use_gate = use_gate
-        self.use_bypass = use_bypass
+        self.n_layers = n_layers
 
         self.embed = nn.Embedding(vocab_size, emb_dim)
         self.cell = PRISMCell(
@@ -90,41 +91,47 @@ class PRISMLangModel(nn.Module):
             input_dep_pi=input_dep_pi,
             momentum=momentum,
         )
-        self.norm_f = nn.LayerNorm(d)       # Mamba/GPT-2 style pre-unembed norm
+        self.norm_f = nn.LayerNorm(d)
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
+        # 계층적 예측 코딩 상위 레이어들.
+        # 레이어 l>0은 레이어 l-1의 상태(d-dim)를 관측값으로 받아 자신의 에너지를 하강.
+        if n_layers > 1:
+            self.upper_cells = nn.ModuleList([
+                PRISMCell(
+                    d=d, emb_dim=d,
+                    lam=lam, K=K, alpha=alpha,
+                    mem_eta=mem_eta, mem_gamma=mem_gamma,
+                    memory_mode=memory_mode, mem_rank=mem_rank,
+                    approximate_grad=approximate_grad,
+                    mem_scale=mem_scale, state_norm=state_norm,
+                    simple_prior=True,   # identity prior: μ = x_{l,prev}
+                    momentum=momentum,
+                )
+                for _ in range(n_layers - 1)
+            ])
+        else:
+            self.upper_cells = nn.ModuleList([])
+
         if use_conv:
-            # 로컬 패턴 캡처: Mamba conv1d 유사체 (depthwise, causal)
-            # char LM에서 "th"→"e", "ing" 등 n-gram 패턴 효율 포착
             self.conv_1d = nn.Conv1d(
                 emb_dim, emb_dim, kernel_size=d_conv,
                 padding=d_conv - 1, groups=emb_dim, bias=True,
             )
 
         if use_gate:
-            # Z-gate: x = x × SiLU(W_z u)  —  Mamba 의 y × SiLU(z) 유사체
-            # 입력이 현재 상태의 어떤 차원을 열고/닫을지 선택.
-            # bias=1.278 → SiLU(1.278) ≈ 1.0, 초기에 identity-like.
+            # 출력 게이트: norm(x_t*)에만 적용, 재귀 상태 x_t*에는 적용하지 않음.
+            # bias=1.278 → SiLU(1.278) ≈ 1.0, 초기에는 identity-like.
             self.gate_proj = nn.Linear(emb_dim, d)
             nn.init.zeros_(self.gate_proj.weight)
             nn.init.constant_(self.gate_proj.bias, 1.278)
 
-        if use_bypass:
-            # 바이패스: logits += W_bypass · u_raw (n-gram 단축로)
-            # 에너지 상태와 독립적으로 로컬 패턴을 직접 예측.
-            # zeros init → 학습 전에는 효과 없음.
-            self.bypass_proj = nn.Linear(emb_dim, vocab_size, bias=False)
-            nn.init.zeros_(self.bypass_proj.weight)
-
         if use_urec:
-            # 설계 정합 순환: ũ = f([u, x_prev]) → 에너지 관측값 u를 풍부하게.
-            # carry gate(에너지 밖 변환) 대신 사용.
             self.u_rec1 = nn.Linear(d + emb_dim, emb_dim)
             self.u_rec2 = nn.Linear(emb_dim, emb_dim, bias=False)
 
         self.carry_nonlin = carry_nonlin
         if carry_nonlin:
-            # carry gate는 하위호환용으로만 유지 (설계 비정합, 신규 코드에서 사용 금지)
             self.carry_gate = nn.Sequential(
                 nn.Linear(d, d // 4),
                 nn.GELU(),
@@ -135,16 +142,14 @@ class PRISMLangModel(nn.Module):
         if use_deq:
             self.deq = DEQSolver()
 
-        # torch.compile: K-step 내부 루프를 퓨전해 Python 오버헤드 감소.
-        # PyTorch 2.0+에서 동작. CPU에서도 reduce-overhead 모드가 유효.
         if use_compile and hasattr(torch, 'compile'):
             try:
                 compiled = torch.compile(
                     self.cell.iterate, mode="reduce-overhead", dynamic=True)
-                import types
+                import types  # noqa: F401
                 self.cell.iterate = compiled
             except Exception:
-                pass  # 컴파일 실패 시 원본 유지
+                pass
 
         self._init_weights()
 
@@ -152,19 +157,30 @@ class PRISMLangModel(nn.Module):
         nn.init.normal_(self.embed.weight, std=0.02)
         nn.init.normal_(self.output_proj.weight, std=0.02)
 
+    def _rms_norm(self, x: torch.Tensor) -> torch.Tensor:
+        return x * x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+
     def init_state(self, batch_size: int, device: torch.device):
-        return self.cell.init_state(batch_size, device)
+        x0, mem0 = self.cell.init_state(batch_size, device)
+        if self.n_layers == 1:
+            return x0, mem0
+        # 다층: all_xs[0..n-1], all_mems[0..n-1].  외부에는 (x_top, packed_mem) 노출.
+        all_xs = [x0] + [
+            torch.zeros(batch_size, self.d, device=device)
+            for _ in range(self.n_layers - 1)
+        ]
+        all_mems = [mem0] + [
+            self.upper_cells[l].init_state(batch_size, device)[1]
+            for l in range(self.n_layers - 1)
+        ]
+        return all_xs[-1], (all_xs, all_mems)
 
     # ---------------------------------------------------------------- #
     # Forward                                                           #
     # ---------------------------------------------------------------- #
 
     def _token_K(self, prev_logits: torch.Tensor, K_min: int, K_max: int) -> int:
-        """
-        이전 토큰 예측 엔트로피 → 현재 토큰 K 결정.
-        엔트로피 높음(불확실) = K 많이, 엔트로피 낮음(확실) = K 적게.
-        설계 이중시계: 어려운 입력일수록 내부시계가 더 많이 돈다.
-        """
+        """이전 예측 엔트로피 → 현재 토큰 K 결정 (이중시계 적응)."""
         with torch.no_grad():
             probs = F.softmax(prev_logits, dim=-1)
             entropy = -(probs * (probs + 1e-9).log()).sum(-1).max().item()
@@ -198,87 +214,119 @@ class PRISMLangModel(nn.Module):
         all_k_used: List[int] = []
 
         _K_max = K_max if K_max is not None else self.cell.K * 2
-        prev_logits: Optional[torch.Tensor] = None  # 적응형 K용 이전 예측
+        prev_logits: Optional[torch.Tensor] = None
 
-        # Pre-embed all input tokens in one batched call
-        u_all = self.embed(tokens[:, :-1])  # [B, T-1, emb_dim]
+        # 사전 임베딩: raw (게이트/urec 기준) + processed (conv 적용 후 cell 관측값)
+        u_all_raw = self.embed(tokens[:, :-1])   # [B, T-1, emb_dim]
+        u_all = u_all_raw
         if self.use_conv:
-            # Causal depthwise conv1d: 로컬 n-gram 패턴 캡처 (Mamba 유사체)
-            u_t = u_all.transpose(1, 2)                # [B, emb_dim, T-1]
-            u_t = self.conv_1d(u_t)[:, :, :T - 1]     # causal: 앞 T-1만
-            u_all = F.silu(u_t.transpose(1, 2))        # [B, T-1, emb_dim]
+            u_t = u_all_raw.transpose(1, 2)
+            u_t = self.conv_1d(u_t)[:, :, :T - 1]
+            u_all = F.silu(u_t.transpose(1, 2))  # [B, T-1, emb_dim]
 
-        for t in range(T - 1):
-            u_raw = u_all[:, t]
-            if self.use_urec:
-                u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+        # ---- 다층 분기 ---- #
+        if self.n_layers > 1:
+            if isinstance(mem, tuple) and isinstance(mem[0], list):
+                xs, mems = mem  # 외부에서 전달된 패킹 상태
             else:
-                u = u_raw
+                _, (xs, mems) = self.init_state(B, device)
 
-            # 적응형 K: 이전 토큰 예측 엔트로피로 현재 K 결정
-            if adaptive_K and not is_training and prev_logits is not None:
-                k_t = self._token_K(prev_logits, K_min, _K_max)
-            else:
-                k_t = None  # cell 기본값 사용
+            for t in range(T - 1):
+                u_raw_t = u_all[:, t]
+                u_embed_t = u_all_raw[:, t]
 
-            if return_energies:
-                x0_cell = None if t == 0 else x
-                x_prior_e = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
-                x_new, energies_t = self.cell.iterate(
-                    u, mem, x0_cell, return_energies=True, training=False, x_prior=x_prior_e)
-                if self.use_gate:
-                    x_new = x_new * F.silu(self.gate_proj(u_raw))
-                rms = x_new.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
-                x_new = x_new * rms
-                mem = self.cell.update_memory(x_new.detach(), mem)
-                x = x_new
-                all_energies.append(energies_t)
-            elif self.use_deq:
-                x_prior_d = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
-                F_fn = lambda z: z + self.cell.alpha * self.cell._neg_grad_E(z, u, mem, x_prior=x_prior_d)
-                x_star, _ = self.deq(F_fn, x, list(self.cell.parameters()))
-                if self.use_gate:
-                    x_star = x_star * F.silu(self.gate_proj(u_raw))
-                rms = x_star.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
-                x_star = x_star * rms
-                mem = self.cell.update_memory(x_star.detach(), mem)
-                x = x_star
-            else:
-                if self.simple_prior:
-                    x_prior = x  # identity prior: μ = x_prev (파라미터 없음)
-                elif self.use_prior:
-                    x_prior = self.cell.prior_mu(x)
+                # Layer 0: token embedding → state
+                if self.use_urec:
+                    u0 = self.u_rec2(F.gelu(self.u_rec1(
+                        torch.cat([u_raw_t, xs[0]], dim=-1))))
                 else:
-                    x_prior = None
-                # t=0: x=zeros → x_init(u) 호출 (None 전달), t>0: 이전 상태 전달
-                x0_cell = None if t == 0 else x
-                x, mem = self.cell(u, mem, x0_cell, training=is_training,
-                                   x_prior=x_prior, K=k_t)
-                if self.use_gate:
-                    x = x * F.silu(self.gate_proj(u_raw))
-                if self.carry_nonlin:
-                    x = self.carry_ln(x + self.carry_gate(x))
+                    u0 = u_raw_t
+                x_prior0 = (xs[0] if self.simple_prior else
+                            (self.cell.prior_mu(xs[0]) if self.use_prior else None))
+                xs[0], mems[0] = self.cell(u0, mems[0], xs[0],
+                                           training=is_training, x_prior=x_prior0)
+                xs[0] = self._rms_norm(xs[0])
+
+                # Layers 1+: lower state → upper state (계층적 예측 코딩)
+                for l in range(self.n_layers - 1):
+                    x_obs = xs[l]           # 하위 레이어 출력 = 관측값
+                    x_prior_l = xs[l + 1]   # 상위 레이어 이전 상태 = identity prior
+                    xs[l + 1], mems[l + 1] = self.upper_cells[l](
+                        x_obs, mems[l + 1], xs[l + 1],
+                        training=is_training, x_prior=x_prior_l)
+                    xs[l + 1] = self._rms_norm(xs[l + 1])
+
+                all_x.append(xs[-1])
+
+                if adaptive_K and not is_training:
+                    prev_logits = self.output_proj(self.norm_f(xs[-1].detach()))
+                    all_k_used.append(self.cell.K)
+
+                if tbptt_window > 0 and (t + 1) % tbptt_window == 0:
+                    xs = [xi.detach() for xi in xs]
+
+        # ---- 단층 분기 ---- #
+        else:
+            for t in range(T - 1):
+                u_raw_t = u_all[:, t]
+                u_embed_t = u_all_raw[:, t]
+
+                if self.use_urec:
+                    u = self.u_rec2(F.gelu(self.u_rec1(
+                        torch.cat([u_raw_t, x], dim=-1))))
                 else:
-                    rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
-                    x = x * rms
+                    u = u_raw_t
 
-            # 다음 토큰 K 결정을 위해 현재 logits 저장
-            if adaptive_K and not is_training:
-                prev_logits = self.output_proj(self.norm_f(x.detach()))
-                if self.use_bypass:
-                    prev_logits = prev_logits + self.bypass_proj(u_raw.detach())
-                all_k_used.append(k_t if k_t is not None else self.cell.K)
+                if adaptive_K and not is_training and prev_logits is not None:
+                    k_t = self._token_K(prev_logits, K_min, _K_max)
+                else:
+                    k_t = None
 
-            all_x.append(x)
+                if return_energies:
+                    x0_cell = None if t == 0 else x
+                    x_prior_e = (x if self.simple_prior else
+                                 (self.cell.prior_mu(x) if self.use_prior else None))
+                    x_new, energies_t = self.cell.iterate(
+                        u, mem, x0_cell, return_energies=True,
+                        training=False, x_prior=x_prior_e)
+                    mem = self.cell.update_memory(x_new.detach(), mem)
+                    x = self._rms_norm(x_new)
+                    all_energies.append(energies_t)
+                elif self.use_deq:
+                    x_prior_d = (x if self.simple_prior else
+                                 (self.cell.prior_mu(x) if self.use_prior else None))
+                    F_fn = lambda z: z + self.cell.alpha * self.cell._neg_grad_E(
+                        z, u, mem, x_prior=x_prior_d)
+                    x_star, _ = self.deq(F_fn, x, list(self.cell.parameters()))
+                    mem = self.cell.update_memory(x_star.detach(), mem)
+                    x = self._rms_norm(x_star)
+                else:
+                    x_prior = (x if self.simple_prior else
+                               (self.cell.prior_mu(x) if self.use_prior else None))
+                    x0_cell = None if t == 0 else x
+                    x, mem = self.cell(u, mem, x0_cell, training=is_training,
+                                       x_prior=x_prior, K=k_t)
+                    if self.carry_nonlin:
+                        x = self.carry_ln(x + self.carry_gate(x))
+                    else:
+                        x = self._rms_norm(x)
 
-            if tbptt_window > 0 and (t + 1) % tbptt_window == 0:
-                x = x.detach()
+                if adaptive_K and not is_training:
+                    prev_logits = self.output_proj(self.norm_f(x.detach()))
+                    all_k_used.append(k_t if k_t is not None else self.cell.K)
 
-        # Batch output projection: one call instead of T-1 calls
-        x_stacked = torch.stack(all_x, dim=1)          # [B, T-1, d]
-        logits_all = self.output_proj(self.norm_f(x_stacked))  # [B, T-1, vocab_size]
-        if self.use_bypass:
-            logits_all = logits_all + self.bypass_proj(u_all)  # [B, T-1, vocab_size]
+                all_x.append(x)
+
+                if tbptt_window > 0 and (t + 1) % tbptt_window == 0:
+                    x = x.detach()
+
+        # ---- 배치 출력 투영 ---- #
+        x_stacked = torch.stack(all_x, dim=1)           # [B, T-1, d]
+        h = self.norm_f(x_stacked)                      # [B, T-1, d]
+        if self.use_gate:
+            # readout gate: h에만 적용. 재귀 상태 x_t*는 변경하지 않음.
+            h = h * F.silu(self.gate_proj(u_all_raw))   # [B, T-1, d]
+        logits_all = self.output_proj(h)                # [B, T-1, vocab_size]
 
         targets = tokens[:, 1:]
         loss = F.cross_entropy(
@@ -309,38 +357,86 @@ class PRISMLangModel(nn.Module):
         B = prompt.shape[0]
         device = prompt.device
         x, mem = self.init_state(B, device)
-        # conv buffer: 마지막 d_conv 토큰 임베딩 (순차 생성용)
+
+        # 다층: 내부 상태 언패킹
+        if self.n_layers > 1:
+            _, (xs, mems) = self.init_state(B, device)
+
         conv_buf = x.new_zeros(B, self.emb_dim, self.d_conv) if self.use_conv else None
 
-        def _apply_conv(u_raw, buf):
-            buf = torch.cat([buf[:, :, 1:], u_raw.unsqueeze(-1)], dim=-1)
+        def _apply_conv(u_embed, buf):
+            buf = torch.cat([buf[:, :, 1:], u_embed.unsqueeze(-1)], dim=-1)
             u_c = (self.conv_1d.weight.squeeze(1) * buf).sum(-1) + self.conv_1d.bias
             return F.silu(u_c), buf
 
-        _first_tok = True
-        for tok in prompt.unbind(1):
-            u_raw = self.embed(tok)
+        def _cell_step(u_embed, x_in, mem_in, x0_arg):
+            """단층 1-step. u_embed: pre-conv 임베딩."""
+            nonlocal conv_buf
             if self.use_conv:
-                u_raw, conv_buf = _apply_conv(u_raw, conv_buf)
+                u_raw, conv_buf = _apply_conv(u_embed, conv_buf)
+            else:
+                u_raw = u_embed
             if self.use_urec:
-                u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+                x_ref = x_in if x_in is not None else torch.zeros(B, self.d, device=device)
+                u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x_ref], dim=-1))))
             else:
                 u = u_raw
-            x_prior = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
-            x0_gen = None if _first_tok else x
-            x = self.cell.iterate(u, mem, x0_gen, K=K_gen, training=False, x_prior=x_prior)
-            _first_tok = False
-            if self.use_gate:
-                x = x * F.silu(self.gate_proj(u_raw))
-            mem = self.cell.update_memory(x, mem)
-            rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
-            x = x * rms
+            x_prior = (x_in if self.simple_prior else
+                       (self.cell.prior_mu(x_in) if self.use_prior and x_in is not None else None))
+            x_new = self.cell.iterate(u, mem_in, x0_arg, K=K_gen, training=False, x_prior=x_prior)
+            mem_new = self.cell.update_memory(x_new, mem_in)
+            x_new = self._rms_norm(x_new)
+            return x_new, mem_new, u_embed   # u_embed 반환 (게이트용)
 
+        def _upper_step(x_prev_in, xs_in, mems_in):
+            """다층 상위 레이어 1-step."""
+            for l in range(self.n_layers - 1):
+                xs_in[l + 1], mems_in[l + 1] = self.upper_cells[l](
+                    xs_in[l], mems_in[l + 1], xs_in[l + 1],
+                    training=False, x_prior=xs_in[l + 1])
+                xs_in[l + 1] = self._rms_norm(xs_in[l + 1])
+
+        # 프롬프트 처리
+        _first = True
+        last_u_embed = None
+        for tok in prompt.unbind(1):
+            u_embed = self.embed(tok)
+            if self.n_layers > 1:
+                if self.use_conv:
+                    u_raw, conv_buf = _apply_conv(u_embed, conv_buf)
+                else:
+                    u_raw = u_embed
+                if self.use_urec:
+                    u = self.u_rec2(F.gelu(self.u_rec1(
+                        torch.cat([u_raw, xs[0]], dim=-1))))
+                else:
+                    u = u_raw
+                x_prior0 = (xs[0] if self.simple_prior else
+                            (self.cell.prior_mu(xs[0]) if self.use_prior else None))
+                xs[0] = self.cell.iterate(u, mems[0], xs[0] if not _first else None,
+                                          K=K_gen, training=False, x_prior=x_prior0)
+                mems[0] = self.cell.update_memory(xs[0], mems[0])
+                xs[0] = self._rms_norm(xs[0])
+                _upper_step(xs[0], xs, mems)
+            else:
+                x, mem, u_embed = _cell_step(u_embed, x if not _first else None, mem, None if _first else x)
+            _first = False
+            last_u_embed = u_embed
+
+        # 생성 루프
         generated = prompt.tolist()
         for _ in range(max_new_tokens):
-            logits = self.output_proj(self.norm_f(x))
-            if self.use_bypass:
-                logits = logits + self.bypass_proj(u_raw)
+            if self.n_layers > 1:
+                h = self.norm_f(xs[-1])
+                if self.use_gate and last_u_embed is not None:
+                    h = h * F.silu(self.gate_proj(last_u_embed))
+                logits = self.output_proj(h)
+            else:
+                h = self.norm_f(x)
+                if self.use_gate and last_u_embed is not None:
+                    h = h * F.silu(self.gate_proj(last_u_embed))
+                logits = self.output_proj(h)
+
             logits = logits / temperature
             if top_k is not None:
                 topk_val = torch.topk(logits, top_k, dim=-1).values
@@ -349,20 +445,27 @@ class PRISMLangModel(nn.Module):
             next_tok = torch.multinomial(probs, 1).squeeze(-1)
             for b in range(B):
                 generated[b].append(next_tok[b].item())
-            u_raw = self.embed(next_tok)
-            if self.use_conv:
-                u_raw, conv_buf = _apply_conv(u_raw, conv_buf)
-            if self.use_urec:
-                u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
+
+            u_embed = self.embed(next_tok)
+            last_u_embed = u_embed
+            if self.n_layers > 1:
+                if self.use_conv:
+                    u_raw, conv_buf = _apply_conv(u_embed, conv_buf)
+                else:
+                    u_raw = u_embed
+                if self.use_urec:
+                    u = self.u_rec2(F.gelu(self.u_rec1(
+                        torch.cat([u_raw, xs[0]], dim=-1))))
+                else:
+                    u = u_raw
+                x_prior0 = (xs[0] if self.simple_prior else
+                            (self.cell.prior_mu(xs[0]) if self.use_prior else None))
+                xs[0] = self.cell.iterate(u, mems[0], xs[0], K=K_gen, training=False, x_prior=x_prior0)
+                mems[0] = self.cell.update_memory(xs[0], mems[0])
+                xs[0] = self._rms_norm(xs[0])
+                _upper_step(xs[0], xs, mems)
             else:
-                u = u_raw
-            x_prior = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
-            x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
-            if self.use_gate:
-                x = x * F.silu(self.gate_proj(u_raw))
-            mem = self.cell.update_memory(x, mem)
-            rms = x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
-            x = x * rms
+                x, mem, _ = _cell_step(u_embed, x, mem, x)
 
         return torch.tensor(generated, device=device)
 

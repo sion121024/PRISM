@@ -166,6 +166,14 @@ def train_char_lm(args):
             mem_eta=args.mem_eta, mem_gamma=args.mem_gamma,
             memory_mode=args.memory_mode, mem_rank=args.mem_rank,
             approximate_grad=args.approximate_grad,
+            n_layers=args.n_layers,
+            use_gate=args.use_gate,
+            use_conv=args.use_conv,
+            use_compile=args.use_compile,
+            simple_prior=args.simple_prior,
+            prior_bias=args.prior_bias,
+            input_dep_pi=args.input_dep_pi,
+            momentum=args.momentum,
         ).to(device)
         print(f"PRISM params: {model.num_params():,}")
 
@@ -239,6 +247,21 @@ def get_args():
     p.add_argument("--lam", type=float, default=0.01, help="정규화 λ")
     p.add_argument("--mem_eta", type=float, default=0.01, help="M 학습률 η")
     p.add_argument("--mem_gamma", type=float, default=0.001, help="M 감쇠 γ")
+    p.add_argument("--n_layers", type=int, default=1, help="계층적 예측 코딩 레이어 수")
+    p.add_argument("--use_gate", action="store_true", default=False,
+                   help="출력 readout 게이트 (상태 수정 없음)")
+    p.add_argument("--use_conv", action="store_true", default=False,
+                   help="depthwise conv1d n-gram 패턴 캡처")
+    p.add_argument("--use_compile", action="store_true", default=False,
+                   help="torch.compile로 cell.iterate 퓨전 (~2x 속도)")
+    p.add_argument("--simple_prior", action="store_true", default=False,
+                   help="identity prior μ=x_prev")
+    p.add_argument("--prior_bias", action="store_true", default=False,
+                   help="biased prior μ=x_prev+b")
+    p.add_argument("--input_dep_pi", action="store_true", default=False,
+                   help="입력 의존 정밀도 Π1(u), Π2(u)")
+    p.add_argument("--momentum", type=float, default=0.0,
+                   help="K-step Heavy-ball β")
 
     # 학습
     p.add_argument("--epochs", type=int, default=20)

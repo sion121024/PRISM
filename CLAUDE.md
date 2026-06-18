@@ -69,12 +69,12 @@ python train.py --task char_lm --epochs 20 --baseline lstm
 | `momentum` | 0.0 | K-step Heavy-ball β (0.9 권장) |
 | `use_conv` | False | Depthwise conv1d n-gram 패턴 캡처 (Mamba 유사체, +320 params) |
 | `d_conv` | 4 | conv1d 커널 크기 |
-| `use_gate` | False | Z-gate x=x×SiLU(W_z·u), Mamba y×SiLU(z) 유사체 (+10,920 params) |
-| `use_bypass` | False | n-gram 단축로: logits+=W_bypass·u_conv, fast n-gram path (+4,160 params) |
+| `use_gate` | False | readout-only 게이트: h=norm(x)×SiLU(W_g·u) → logits. 재귀 상태 x 불변 (+10,920 params) |
 | `use_compile` | False | torch.compile로 cell.iterate 퓨전 — 약 2× 속도 향상 (PyTorch 2.0+) |
 | `use_deq` | False | DEQ implicit diff — O(1) 메모리 역전파 (Anderson acceleration) |
 | `approximate_grad` | False | K-1 no_grad + 1 grad — 역전파 그래프 1/K로 축소 |
 | `tbptt_window` | 0 | Truncated BPTT 윈도우 크기 (0=끔, 예: 16) — 긴 시퀀스 학습 시 메모리 절약 |
+| `n_layers` | 1 | 계층적 예측 코딩 레이어 수. l>0 레이어는 x_{l-1}을 관측값으로 받음 |
 
 ## CPU 성능 최적화
 
