@@ -45,6 +45,21 @@ dx/ds = −∂E/∂x   (K번 반복 = 내부 사고 깊이)
 
 **데이터**: 셰익스피어 전집 ~1.1MB, vocab 65자, block_size=64
 
+#### Stage 12: Mamba 격차 원인 분석 (3 epochs, 조기 신호)
+
+| 모델 | K | rank | 3 epoch BEST ppl | 속도 | 비고 |
+|------|---|------|-----------------|------|------|
+| PRISM-slim-K4 | 4 | 24 | 28.381 | 261s/epoch | 기준 |
+| PRISM-slim-K8 | 8 | 24 | 28.251 | 507s/epoch | +0.129 ppl |
+| PRISM-highrank-K4 | 4 | 48 | 28.373 | 375s/epoch | +0.007 ppl |
+| **Mamba** | — | — | **7.850** | 75s/epoch | −20.5 ppl 격차 |
+
+- **K=8 효과**: +0.129 ppl 개선, 학습 2× 느림 (3 epoch 기준; 장기에서 더 큰 효과 예상)
+- **rank=48 효과**: +0.007 ppl (무의미) — 초기 학습에서 기억 미충전으로 rank 증가 효과 없음
+- **Mamba 조기 우위**: epoch 1부터 **9.381 ppl** — PRISM epoch 1 (28.466)의 3배 낮음
+- **핵심 발견**: Mamba conv1d가 즉시 로컬 n-gram 패턴 포착; PRISM은 Hebbian 기억 충전에 수 epoch 필요
+- **동기**: `use_conv=True` 추가 → PRISM도 epoch 1부터 로컬 패턴 학습 가능 (단 320 params)
+
 #### Stage 10: 단순화 실험 (simple_prior vs prior_mu MLP)
 
 | 모델 | prior | params | BEST ppl |
@@ -214,10 +229,10 @@ char LM에서 "th"→"e", "ing", "tion" 같은 로컬 n-gram 패턴을 효율적
 - [x] **Stage 9** — Mamba 비교: Mamba **6.605** vs PRISM-K4 **14.525** (Mamba 승, +7.9 ppl); K-effect +0.951 ppl 유지
 - [x] **Stage 9b** — 멀티모달 구현: 에너지에 시각 항 추가 → 이미지 없을 때 3.808 vs 있을 때 **3.218** ppl (+0.590 개선)
 - [x] **Stage 10** — 단순화 분석: identity prior의 K-effect 3.5× 더 큼; u_rec 필수 확인; 10 epoch v1-K4 **12.794** vs slim-K4 15.048
+- [x] **Stage 12** — Mamba 격차 원인 분석 (3 epoch 조기 신호): K=8 +0.129 ppl, rank=48 +0.007 ppl; Mamba **7.850** vs PRISM **28.381** (gap +20.5 ppl at 3 epochs); Mamba epoch 1부터 9.381 → conv1d가 핵심
 
 ### 진행 예정
 - [ ] **Stage 11** — 적응형 K(t) 실측: 엔트로피 기반 K 선택 vs 고정 K 비교
-- [ ] **Stage 12** — Mamba 격차 분석 진행 중: K=8 빠른 수렴 확인 (K4 대비 4× 빠른 개선)
 - [ ] **Stage 13** — Selective PRISM 검증: Π(u) vs const Π, 파라미터 매칭 비교
-- [ ] **Stage 14** — 전체 개선사항 ablation: input_dep_pi + momentum + norm_f + prior_bias
+- [ ] **Stage 14** — 전체 개선사항 ablation (실행 중): conv1d + input_dep_pi + momentum + prior_bias
 - [ ] **Stage V** — GPU 스케일업: 50~150M params (V100)
