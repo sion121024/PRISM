@@ -57,6 +57,7 @@ class PRISMLangModel(nn.Module):
         d_conv: int = 4,
         use_gate: bool = False,
         use_bypass: bool = False,
+        use_compile: bool = False,  # torch.compile로 cell.iterate 퓨전 (PyTorch 2.0+)
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -133,6 +134,17 @@ class PRISMLangModel(nn.Module):
 
         if use_deq:
             self.deq = DEQSolver()
+
+        # torch.compile: K-step 내부 루프를 퓨전해 Python 오버헤드 감소.
+        # PyTorch 2.0+에서 동작. CPU에서도 reduce-overhead 모드가 유효.
+        if use_compile and hasattr(torch, 'compile'):
+            try:
+                compiled = torch.compile(
+                    self.cell.iterate, mode="reduce-overhead", dynamic=True)
+                import types
+                self.cell.iterate = compiled
+            except Exception:
+                pass  # 컴파일 실패 시 원본 유지
 
         self._init_weights()
 

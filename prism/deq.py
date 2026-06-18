@@ -97,12 +97,14 @@ class _DEQBackward(torch.autograd.Function):
     def forward(ctx, x_star: torch.Tensor, F_fn, *params):
         ctx.save_for_backward(x_star)
         ctx.F_fn = F_fn
+        ctx.n_params = len(params)  # params 수를 저장해야 backward에서 맞게 반환
         return x_star
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         x_star, = ctx.saved_tensors
         F_fn = ctx.F_fn
+        n_params = ctx.n_params
 
         # Neumann 반복: v_{n+1} = grad + J_Fᵀ v_n
         v = grad_output.detach().clone()
@@ -116,8 +118,8 @@ class _DEQBackward(torch.autograd.Function):
                 break
             v = v_new
 
-        # x_star 의 그래디언트 = v (체인룰 나머지는 autograd가 처리)
-        return v, None, *([None] * len(ctx.saved_tensors[1:]))
+        # grad_x_star=v, grad_F_fn=None, grad_params=None×n_params
+        return (v, None) + (None,) * n_params
 
 
 class DEQSolver(nn.Module):

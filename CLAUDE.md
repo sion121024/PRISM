@@ -71,17 +71,21 @@ python train.py --task char_lm --epochs 20 --baseline lstm
 | `d_conv` | 4 | conv1d 커널 크기 |
 | `use_gate` | False | Z-gate x=x×SiLU(W_z·u), Mamba y×SiLU(z) 유사체 (+10,920 params) |
 | `use_bypass` | False | n-gram 단축로: logits+=W_bypass·u_conv, fast n-gram path (+4,160 params) |
+| `use_compile` | False | torch.compile로 cell.iterate 퓨전 — 약 2× 속도 향상 (PyTorch 2.0+) |
+| `use_deq` | False | DEQ implicit diff — O(1) 메모리 역전파 (Anderson acceleration) |
+| `approximate_grad` | False | K-1 no_grad + 1 grad — 역전파 그래프 1/K로 축소 |
+| `tbptt_window` | 0 | Truncated BPTT 윈도우 크기 (0=끔, 예: 16) — 긴 시퀀스 학습 시 메모리 절약 |
 
 ## CPU 성능 최적화
 
 train.py는 `torch.set_num_threads(1)` 을 자동으로 설정.
 PyTorch 멀티스레드 오버헤드(소형 텐서 문제): 4 threads = 14ms, 1 thread = 0.1ms (136× 차이).
 
-| 설정 | 속도 (B=32) |
+| 설정 | 속도 (B=64, T=64) |
 |------|------------|
-| assoc_recall K=3 d=128 T=9 | ~30ms/batch |
-| char_lm K=2 d=256 T=128 | ~520ms/batch (~2.7min/epoch) |
-| char_lm K=1 d=256 T=128 | ~315ms/batch (~1.6min/epoch) |
+| slim-K4 base | ~780ms/batch |
+| slim-K4 + use_compile | ~370ms/batch (~2.1× 빠름) |
+| (참고) assoc_recall K=3 d=128 T=9 | ~30ms/batch |
 
 ## de-risking 단계
 

@@ -34,8 +34,9 @@ class SlidingMemory:
     x̂ = normalize(x),  ê = normalize(εmem)
     이전 대칭 Hopfield와 달리 비대칭(key≠value) → 오류신호 기반 연상기억.
 
-    상태: (x_buf [B,r,d], e_buf [B,r,d])  ← 순수 텐서, torch.compile 호환
-    slot 0 = newest, slot rank-1 = oldest
+    순환 버퍼(circular buffer): update()에서 tensor 할당 없음.
+    상태: (x_buf [B,r,d], e_buf [B,r,d], head int)
+    head = 다음 쓰기 슬롯. _all_w[head, k] = 슬롯 k의 나이 기반 가중치.
     """
 
     def __init__(self, d: int, rank: int, gamma: float, scale: float = 1.0):
@@ -44,44 +45,53 @@ class SlidingMemory:
         self.decay = 1.0 - gamma
         self.scale = scale / rank  # spectral_norm(M) ≈ scale
 
-    def _w(self, device: torch.device) -> torch.Tensor:
-        if not hasattr(self, '_w_cache') or self._w_cache.device != device:
-            self._w_cache = (self.decay ** torch.arange(
-                self.rank, device=device).float()).unsqueeze(0)
-        return self._w_cache
+        # 순환 버퍼 가중치 사전 계산: _all_w[h, k] = head=h일 때 슬롯 k의 가중치.
+        # head=h → 최근 쓰기 슬롯=(h-1)%rank, 나이 age(k)=(h-1-k+rank)%rank.
+        k_idx = torch.arange(rank).float()
+        rows = []
+        for h in range(rank):
+            age = (h - 1 - k_idx + rank) % rank
+            rows.append((self.decay ** age) * self.scale)
+        self._all_w = torch.stack(rows, 0)  # [rank, rank] CPU tensor
+
+    def _get_w(self, head: int, device: torch.device) -> torch.Tensor:
+        if self._all_w.device != device:
+            self._all_w = self._all_w.to(device)
+        return self._all_w[head].unsqueeze(0)  # [1, rank]
 
     def init(self, B: int, device: torch.device):
         z = torch.zeros(B, self.rank, self.d, device=device)
-        return (z, z.clone())  # (x_buf, e_buf)
+        return (z, z.clone(), 0)  # (x_buf, e_buf, head)
 
     def apply(self, x_q: torch.Tensor, state) -> torch.Tensor:
         """M x_q = Σ_i w_i (x̂_i · x_q) ê_i"""
-        x_buf, e_buf = state
-        dots = (x_buf * x_q.unsqueeze(1)).sum(-1) * self._w(x_q.device) * self.scale
-        return (dots.unsqueeze(-1) * e_buf).sum(1)
+        x_buf, e_buf, head = state
+        w = self._get_w(head, x_q.device)  # [1, rank]
+        dots = (x_buf * x_q.unsqueeze(1)).sum(-1) * w  # [B, rank]
+        return (dots.unsqueeze(-1) * e_buf).sum(1)  # [B, d]
 
     def apply_T(self, v_q: torch.Tensor, state) -> torch.Tensor:
         """Mᵀ v_q = Σ_i w_i (ê_i · v_q) x̂_i"""
-        x_buf, e_buf = state
-        dots = (e_buf * v_q.unsqueeze(1)).sum(-1) * self._w(v_q.device) * self.scale
-        return (dots.unsqueeze(-1) * x_buf).sum(1)
+        x_buf, e_buf, head = state
+        w = self._get_w(head, v_q.device)  # [1, rank]
+        dots = (e_buf * v_q.unsqueeze(1)).sum(-1) * w  # [B, rank]
+        return (dots.unsqueeze(-1) * x_buf).sum(1)  # [B, d]
 
     @torch.no_grad()
     def update(self, x_new: torch.Tensor, eps_new: torch.Tensor, state) -> tuple:
-        """(x̂_new, ê_new) 쌍을 slot 0에 삽입, 이전 항목 한 칸 밀어냄."""
-        x_buf, e_buf = state
+        """순환 버퍼 갱신: head 슬롯에 쓰기 (shift 없음, clone으로 autograd 버전 충돌 방지)."""
+        x_buf, e_buf, head = state
         xk = x_new.detach()
         xk = xk / xk.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         ek = eps_new.detach()
         ek = ek / ek.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-
-        new_x = torch.empty_like(x_buf)
-        new_e = torch.empty_like(e_buf)
-        new_x[:, 0, :] = xk
-        new_x[:, 1:, :] = x_buf[:, :-1, :]
-        new_e[:, 0, :] = ek
-        new_e[:, 1:, :] = e_buf[:, :-1, :]
-        return (new_x, new_e)
+        # clone(): autograd가 이전 x_buf를 저장한 경우 버전 충돌 방지.
+        # 단일 슬롯만 갱신 (shift 없음) → 구버전보다 빠른 memcpy.
+        x_buf = x_buf.clone()
+        e_buf = e_buf.clone()
+        x_buf[:, head, :] = xk
+        e_buf[:, head, :] = ek
+        return (x_buf, e_buf, (head + 1) % self.rank)
 
 
 # ------------------------------------------------------------------ #
