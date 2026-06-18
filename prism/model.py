@@ -228,7 +228,9 @@ class PRISMLangModel(nn.Module):
                     x_prior = self.cell.prior_mu(x)
                 else:
                     x_prior = None
-                x, mem = self.cell(u, mem, x, training=is_training,
+                # t=0: x=zeros → x_init(u) 호출 (None 전달), t>0: 이전 상태 전달
+                x0_cell = None if t == 0 else x
+                x, mem = self.cell(u, mem, x0_cell, training=is_training,
                                    x_prior=x_prior, K=k_t)
                 if self.use_gate:
                     x = x * F.silu(self.gate_proj(u_raw))
