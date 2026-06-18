@@ -210,8 +210,13 @@ class PRISMLangModel(nn.Module):
                 k_t = None  # cell 기본값 사용
 
             if return_energies:
+                x0_cell = None if t == 0 else x
                 x_new, energies_t = self.cell.iterate(
-                    u, mem, x, return_energies=True, training=False)
+                    u, mem, x0_cell, return_energies=True, training=False)
+                if self.use_gate:
+                    x_new = x_new * F.silu(self.gate_proj(u_raw))
+                rms = x_new.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+                x_new = x_new * rms
                 mem = self.cell.update_memory(x_new.detach(), mem)
                 x = x_new
                 all_energies.append(energies_t)
