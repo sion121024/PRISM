@@ -360,6 +360,101 @@ class PRISMCell(nn.Module):
     # 내부시계 s                                                        #
     # ---------------------------------------------------------------- #
 
+    def _diag_hessian(
+        self, u: torch.Tensor, mem_state,
+        _pi1=None, _pi2=None, _pi3=None,
+    ) -> torch.Tensor:
+        """
+        대각 Hessian d²E/dx²의 대각 성분 추정.
+        H_ii = Σ_j π1_j D_ji² + Σ_j π2_j (δ_ij − M_ji)² + π3_i + λ
+
+        K-step 닫힌 형식(diagonal scan)과 exact linear solve에 사용.
+        MLP 디코더의 경우 고차항 무시 (1차 근사).
+        """
+        pi1 = _pi1 if _pi1 is not None else self.pi1  # [emb_dim] or [B, emb_dim]
+        pi2 = _pi2 if _pi2 is not None else self.pi2  # [d] or [B, d]
+
+        # 지각 항: diag(D^T Π1 D)[i] = Σ_j π1_j * D_ji²
+        if self.decoder == "linear":
+            W = self.D.weight  # [emb_dim, d]
+            if pi1.dim() == 1:
+                h_in = (W ** 2 * pi1.unsqueeze(-1)).sum(0)  # [d]
+            else:
+                h_in = (W.unsqueeze(0) ** 2 * pi1.unsqueeze(-1)).sum(1)  # [B, d]
+        else:
+            # MLP: use pi1-weighted squared Frobenius norm of W2 W1 (crude approx)
+            h_in = torch.zeros(self.d, device=u.device)
+
+        # 기억 항: diag((I-M)^T Π2 (I-M))[i] ≈ π2_i + diag(M^T Π2 M)[i]
+        if self.memory_mode == "sliding" and mem_state is not None:
+            x_buf, e_buf, head = mem_state
+            w = self.sliding._get_w(head, u.device)  # [1, rank]
+            # Mᵀ v ≈ sliding.apply_T(v, state) — per-dim contribution
+            # Diagonal of (I-M)^T Π2 (I-M) ≈ π2 (identity term dominates)
+            if pi2.dim() == 1:
+                h_mem = pi2  # [d]  (first-order approx: off-diagonal M terms neglected)
+            else:
+                h_mem = pi2  # [B, d]
+        elif self.memory_mode == "full_M" and mem_state is not None:
+            M = mem_state  # [B, d, d]
+            if pi2.dim() == 1:
+                h_mem = pi2 + ((M ** 2) * pi2.unsqueeze(-1)).sum(-2)  # [B, d]
+            else:
+                h_mem = pi2 + ((M ** 2) * pi2.unsqueeze(-1)).sum(-2)
+        else:
+            h_mem = pi2 if pi2.dim() == 1 else pi2
+
+        # Prior 항
+        if (self.use_prior or self.simple_prior):
+            pi3 = _pi3 if _pi3 is not None else self.pi3  # [d]
+            h_prior = pi3
+        else:
+            h_prior = 0.0
+
+        return h_in + h_mem + h_prior + self.lam  # [d] or [B, d]
+
+    def _diag_scan_K(
+        self,
+        u: torch.Tensor, mem_state, x0: torch.Tensor, K: int,
+        x_prior: Optional[torch.Tensor] = None,
+        _pi1=None, _pi2=None, _pi3=None,
+    ) -> torch.Tensor:
+        """
+        대각 근사 병렬 K-step: 닫힌 형식 x_K = a^K x_0 + b (a^K-1)/(a-1).
+        K번 반복 없이 O(1)로 에너지 최솟값 근사.
+
+        원리: x_{k+1} = x_k + α(-∂E/∂x) = (1 - α*H_ii) x_i + α*b_i
+              K 반복 → x_K[i] = a[i]^K x_0[i] + b[i] * Σ_{k=0}^{K-1} a[i]^k
+        """
+        pi1 = _pi1 if _pi1 is not None else self.pi1
+        pi2 = _pi2 if _pi2 is not None else self.pi2
+        pi3 = _pi3 if (self.use_prior or self.simple_prior) else None
+
+        # b = α * (-∂E/∂x)|_{선형 항만}: α * D^T Π1 u (+ prior drift)
+        if self.decoder == "linear":
+            b = self.alpha * (pi1 * u) @ self.D.weight  # [B, d]
+        else:
+            b = self.alpha * self._neg_grad_E(x0, u, mem_state, x_prior, _pi1=pi1, _pi2=pi2, _pi3=pi3)
+            # For MLP fall back to one gradient step and iterate
+            return x0 + b
+
+        if x_prior is not None and (self.use_prior or self.simple_prior):
+            p3 = self.pi3
+            mu = x_prior + self.prior_b if self.has_prior_bias else x_prior
+            b = b + self.alpha * p3 * mu  # drift from prior
+
+        # a = 1 - α * H_diag (step factor per dimension)
+        H = self._diag_hessian(u, mem_state, _pi1=pi1, _pi2=pi2, _pi3=pi3)  # [d] or [B, d]
+        a = 1.0 - self.alpha * H  # [d] or [B, d]
+
+        # K-step closed form
+        a_K = a ** K  # [d] or [B, d]
+        # Geometric sum: Σ_{k=0}^{K-1} a^k = (a^K - 1)/(a - 1),  lim_{a→1} = K
+        denom = a - 1.0
+        geo = torch.where(denom.abs() > 1e-7, (a_K - 1.0) / denom,
+                          torch.full_like(a, float(K)))
+        return a_K * x0 + b * geo
+
     def iterate(
         self,
         u: torch.Tensor,
@@ -372,6 +467,7 @@ class PRISMCell(nn.Module):
         K_min: int = 1,
         K_tol: float = 1e-4,
         x_prior: Optional[torch.Tensor] = None,
+        diag_scan: bool = False,   # 대각 병렬 K-scan (O(1) in K, 근사)
     ):
         """
         내부시계 s: K번 에너지 하강.
@@ -390,6 +486,12 @@ class PRISMCell(nn.Module):
             _pi1 = self.pi1   # [emb_dim]
             _pi2 = self.pi2 if self.memory_mode != "none" else None  # [d]
         _pi3 = self.pi3 if (self.use_prior or self.simple_prior) else None
+
+        # 대각 병렬 K-scan: O(1) in K (닫힌 형식, 근사)
+        if diag_scan and not return_energies:
+            with torch.set_grad_enabled(training):
+                return self._diag_scan_K(u, mem_state, x, K, x_prior,
+                                         _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
 
         if return_energies:
             energies: List[float] = []
