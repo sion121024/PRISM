@@ -289,9 +289,30 @@ x_K     = aᴷ x_0 + b·(aᴷ−1)/(a−1) ← 닫힌 형식 (a = 1 − αH)
 - [x] **Stage 9b** — 멀티모달 구현: 에너지에 시각 항 추가 → 이미지 없을 때 3.808 vs 있을 때 **3.218** ppl (+0.590 개선)
 - [x] **Stage 10** — 단순화 분석: identity prior의 K-effect 3.5× 더 큼; u_rec 필수 확인; 10 epoch v1-K4 **12.794** vs slim-K4 15.048
 - [x] **Stage 12** — Mamba 격차 원인 분석 (3 epoch 조기 신호): K=8 +0.129 ppl, rank=48 +0.007 ppl; Mamba **7.850** vs PRISM **28.381** (gap +20.5 ppl at 3 epochs); Mamba epoch 1부터 9.381 → conv1d가 핵심
+- [x] **Stage 3 (이중시계 검증)** — 훈련 K=4 고정 모델에서 **추론 K↑ → ppl↓** 단조 입증:
+  K=1→28.67, K=2→28.42, K=4→28.29, K=8→28.25, K=16→28.24 (수렴 체감).
+  같은 가중치로 추론 시 에너지를 더 깊이 하강할수록 정확 — **Mamba에 없는 PRISM 고유 능력**
+  (학습 없이 추론비용↔정확도 trade-off). gate 모델도 동일 효과(15.10→14.98).
+- [x] **Stage 14c (readout gate)** — gate가 단일 최대 개선: baseline **19.79** → gate **13.24** ppl
+  (5 epoch, 1.49×). 재귀 상태 x*는 에너지 최솟값 유지 — 설계철학 준수.
 
-### 진행 예정
+### 진행 중 / 핵심 과제: Mamba 격파
+
+**파라미터 매칭 head-to-head (TinyShakespeare, block=128, 5 epoch):**
+
+| 모델 | params | val ppl | 비고 |
+|------|--------|---------|------|
+| **Mamba-d96** | 79,104 | **6.82** | 타겟 (baseline급) |
+| **Mamba-d128** | 130,048 | **6.45** | 타겟 (gate+conv+all급) |
+| PRISM baseline | 79,552 | 19.79 | linear, K=4 |
+| PRISM +gate | 96,192 | 13.24 | readout gate |
+| PRISM +gate+conv+all | 117,568 | (수렴 진행) | 20 epoch 학습 중 |
+
+**현 격차의 본질**: Mamba는 ep2-3에 6.8로 수렴하나 PRISM은 ep5에도 미수렴(13.24, 하강 중).
+Mamba conv1d가 n-gram을 즉시 포착하는 반면 PRISM Hebbian 기억은 충전에 더 많은 epoch 필요.
+공정 비교를 위해 PRISM을 수렴까지 학습(Stage 16) + 비볼록 MLP decoder(Stage 15) 검증 중.
+
+- [ ] **Stage 15** — 비볼록 에너지 (MLP decoder): "진짜 사고는 비볼록 E에서만" 검증 (실행 중)
+- [ ] **Stage 16** — 수렴점 비교: PRISM gate+conv+all 20 epoch vs Mamba 6.45 (실행 중)
 - [ ] **Stage 11** — 적응형 K(t) 실측: 엔트로피 기반 K 선택 vs 고정 K 비교
-- [ ] **Stage 13** — Selective PRISM 검증: Π(u) vs const Π, 파라미터 매칭 비교
-- [ ] **Stage 14** — 전체 개선사항 ablation (실행 중): conv1d + input_dep_pi + momentum + prior_bias
 - [ ] **Stage V** — GPU 스케일업: 50~150M params (V100)
