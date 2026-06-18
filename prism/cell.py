@@ -122,6 +122,7 @@ class PRISMCell(nn.Module):
         use_prior: bool = False,
         simple_prior: bool = False,  # True → μ = x_prev (identity prior)
         prior_bias: bool = False,    # True → μ = x_prev + b (d params, 빠른 수렴)
+        input_dep_pi: bool = False,  # True → Π1(u), Π2(u) — 선택적 precision (Mamba 유사체)
     ):
         super().__init__()
         assert memory_mode in ("sliding", "full_M", "none")
@@ -178,6 +179,18 @@ class PRISMCell(nn.Module):
             self.log_pi3 = nn.Parameter(torch.zeros(d))
         if self.has_prior_bias:
             self.prior_b = nn.Parameter(torch.zeros(d))
+
+        # 입력 의존 precision (Mamba 선택적 메커니즘 유사체)
+        # Mamba: B(x), C(x) — PRISM: Π1(u), Π2(u)
+        # 모든 토큰에 동일 precision 대신 입력에 따라 지각/기억 가중치 조절
+        self.input_dep_pi = input_dep_pi
+        if input_dep_pi:
+            self.pi1_gate = nn.Linear(emb_dim, emb_dim)
+            self.pi2_gate = nn.Linear(emb_dim, d)
+            nn.init.zeros_(self.pi1_gate.weight)
+            nn.init.zeros_(self.pi1_gate.bias)
+            nn.init.zeros_(self.pi2_gate.weight)
+            nn.init.zeros_(self.pi2_gate.bias)
 
         # 초기 상태 인코더
         self.x_init = nn.Linear(emb_dim, d)
@@ -305,15 +318,19 @@ class PRISMCell(nn.Module):
         x_prior: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         eps_in = u - self._decode(x)
-        pi1    = self.pi1
-        pi2    = self.pi2
-        e_in   = 0.5 * (eps_in ** 2 * pi1).sum(-1)
+        if self.input_dep_pi:
+            _pi1 = F.softplus(self.pi1_gate(u))
+            _pi2 = F.softplus(self.pi2_gate(u))
+        else:
+            _pi1 = self.pi1
+            _pi2 = self.pi2
+        e_in   = 0.5 * (eps_in ** 2 * _pi1).sum(-1)
         e_reg  = 0.5 * self.lam * (x ** 2).sum(-1)
 
         if self.memory_mode != "none" and mem_state is not None:
             Mx    = self._Mx(x, mem_state)
             eps_m = x - Mx
-            e_mem = 0.5 * (eps_m ** 2 * pi2).sum(-1)
+            e_mem = 0.5 * (eps_m ** 2 * _pi2).sum(-1)
         else:
             e_mem = x.new_zeros(x.shape[0])
 
@@ -353,8 +370,12 @@ class PRISMCell(nn.Module):
         x = self.x_init(u) if x0 is None else x0
 
         # Precision 벡터 한 번만 계산 (모든 경로 공통)
-        _pi1 = self.pi1
-        _pi2 = self.pi2 if self.memory_mode != "none" else None
+        if self.input_dep_pi:
+            _pi1 = F.softplus(self.pi1_gate(u))   # [B, emb_dim]
+            _pi2 = F.softplus(self.pi2_gate(u)) if self.memory_mode != "none" else None  # [B, d]
+        else:
+            _pi1 = self.pi1   # [emb_dim]
+            _pi2 = self.pi2 if self.memory_mode != "none" else None  # [d]
         _pi3 = self.pi3 if (self.use_prior or self.simple_prior) else None
 
         if return_energies:
@@ -391,10 +412,6 @@ class PRISMCell(nn.Module):
             return x
 
         # Full backprop (기본) — raw x 공간에서 정확한 에너지 경사하강
-        # Precision 벡터를 K-loop 밖에서 한 번만 계산 (K번 반복 overhead 제거)
-        _pi1 = self.pi1
-        _pi2 = self.pi2 if self.memory_mode != "none" else None
-        _pi3 = self.pi3 if (self.use_prior or self.simple_prior) else None
         with torch.set_grad_enabled(training):
             for _ in range(K):
                 x = x + self.alpha * self._neg_grad_E(
