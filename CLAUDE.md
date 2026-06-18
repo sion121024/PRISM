@@ -62,6 +62,11 @@ python train.py --task char_lm --epochs 20 --baseline lstm
 | `lam` | 0.01 | 상태 정규화 λ |
 | `mem_eta` | 0.01 | 빠른가중치 학습률 η |
 | `mem_gamma` | 0.001 | 빠른가중치 감쇠 γ |
+| `simple_prior` | False | Identity prior μ=x_prev (0 params) |
+| `prior_bias` | False | Biased prior μ=x_prev+b (+d params, 빠른 수렴) |
+| `use_urec` | True | 관측 증강 ũ=f([u, x_prev]) (필수) |
+| `input_dep_pi` | False | 선택적 precision Π1(u),Π2(u) ≈ Mamba B/C |
+| `momentum` | 0.0 | K-step Heavy-ball β (0.9 권장) |
 
 ## CPU 성능 최적화
 
