@@ -56,6 +56,7 @@ class PRISMLangModel(nn.Module):
         use_conv: bool = False,
         d_conv: int = 4,
         use_gate: bool = False,
+        use_bypass: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -68,6 +69,7 @@ class PRISMLangModel(nn.Module):
         self.use_conv = use_conv
         self.d_conv = d_conv
         self.use_gate = use_gate
+        self.use_bypass = use_bypass
 
         self.embed = nn.Embedding(vocab_size, emb_dim)
         self.cell = PRISMCell(
@@ -105,6 +107,13 @@ class PRISMLangModel(nn.Module):
             self.gate_proj = nn.Linear(emb_dim, d)
             nn.init.zeros_(self.gate_proj.weight)
             nn.init.constant_(self.gate_proj.bias, 1.278)
+
+        if use_bypass:
+            # 바이패스: logits += W_bypass · u_raw (n-gram 단축로)
+            # 에너지 상태와 독립적으로 로컬 패턴을 직접 예측.
+            # zeros init → 학습 전에는 효과 없음.
+            self.bypass_proj = nn.Linear(emb_dim, vocab_size, bias=False)
+            nn.init.zeros_(self.bypass_proj.weight)
 
         if use_urec:
             # 설계 정합 순환: ũ = f([u, x_prev]) → 에너지 관측값 u를 풍부하게.
@@ -242,6 +251,8 @@ class PRISMLangModel(nn.Module):
         # Batch output projection: one call instead of T-1 calls
         x_stacked = torch.stack(all_x, dim=1)          # [B, T-1, d]
         logits_all = self.output_proj(self.norm_f(x_stacked))  # [B, T-1, vocab_size]
+        if self.use_bypass:
+            logits_all = logits_all + self.bypass_proj(u_all)  # [B, T-1, vocab_size]
 
         targets = tokens[:, 1:]
         loss = F.cross_entropy(

@@ -70,6 +70,7 @@ python train.py --task char_lm --epochs 20 --baseline lstm
 | `use_conv` | False | Depthwise conv1d n-gram 패턴 캡처 (Mamba 유사체, +320 params) |
 | `d_conv` | 4 | conv1d 커널 크기 |
 | `use_gate` | False | Z-gate x=x×SiLU(W_z·u), Mamba y×SiLU(z) 유사체 (+10,920 params) |
+| `use_bypass` | False | n-gram 단축로: logits+=W_bypass·u_conv, fast n-gram path (+4,160 params) |
 
 ## CPU 성능 최적화
 
