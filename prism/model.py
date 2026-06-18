@@ -211,8 +211,9 @@ class PRISMLangModel(nn.Module):
 
             if return_energies:
                 x0_cell = None if t == 0 else x
+                x_prior_e = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
                 x_new, energies_t = self.cell.iterate(
-                    u, mem, x0_cell, return_energies=True, training=False)
+                    u, mem, x0_cell, return_energies=True, training=False, x_prior=x_prior_e)
                 if self.use_gate:
                     x_new = x_new * F.silu(self.gate_proj(u_raw))
                 rms = x_new.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
