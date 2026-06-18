@@ -192,8 +192,9 @@ python verify_convergence.py
 | `momentum` | 0.0 | K-step Heavy-ball β (0.9 권장, 0=끔) |
 | `use_conv` | False | Depthwise conv1d n-gram 패턴 캡처 (+320 params, Mamba 유사체) |
 | `d_conv` | 4 | conv1d 커널 크기 |
-| `use_gate` | False | Z-gate: x = x × SiLU(W_z·u) — Mamba y×SiLU(z) 유사체 (+10,920 params) |
-| `use_bypass` | False | n-gram 단축로: logits += W_bypass·u_conv (+4,160 params) |
+| `use_gate` | False | readout-only 게이트: h = norm(x)×SiLU(W_g·u) → logits. 재귀 상태 x 불변 (+10,920 params) |
+| `n_layers` | 1 | 계층적 예측 코딩 레이어 수 (l>0은 x_{l-1}을 관측값으로 받음) |
+| `diag_scan` | False | 대각 병렬 K-scan: 에너지 하강 O(1) 닫힌 형식 (Mamba parallel scan 동형) |
 
 ### Selective PRISM: input_dep_pi
 
@@ -228,29 +229,49 @@ char LM에서 "th"→"e", "ing", "tion" 같은 로컬 n-gram 패턴을 효율적
 - 생성: 순차 conv buffer — 마지막 d_conv 토큰 유지
 - 추가 파라미터: `emb_dim × d_conv + emb_dim = 64 × 4 + 64 = 320` (매우 저렴)
 
-### Z-Gate: use_gate
+### Readout Gate: use_gate (설계철학 준수)
 
-Mamba의 `y × SiLU(z)` 게이팅 메커니즘의 PRISM 유사체.
+Mamba의 `y × SiLU(z)` 게이팅을 **출력 단계에만** 적용 — 재귀 상태는 순수 에너지 최솟값 유지.
 
 ```
-x = x × SiLU(W_gate · u_raw)  — 입력이 상태의 어떤 차원을 열고/닫을지 선택
+x_t* = argmin_x E(x)            ← 에너지 하강으로 얻은 순수 상태 (게이트 영향 없음)
+h    = norm_f(x_t*)
+h    = h × SiLU(W_g · u)        ← readout 게이트: 어떤 차원을 출력에 쓸지 선택
+logits = output_proj(h)
 ```
 
-- `gate_proj`: `Linear(emb_dim, d)`, bias initialized to 1.278 → SiLU(1.278) ≈ 1.0 (초기 identity)
-- K-step 이후, RMS normalize 이전에 적용
+**왜 설계철학에 맞는가**: 게이트는 `logits = readout(x*)` 의 읽기 함수에만 작용.
+재귀로 다음 토큰에 전달되는 `x_t*` 는 에너지 함수 E의 최솟값 그대로 — 사고 과정 불변.
+(이전 버전은 `x = x × gate` 로 상태를 직접 수정했으나 설계 위반으로 제거됨.)
+
+- `gate_proj`: `Linear(emb_dim, d)`, bias=1.278 → SiLU(1.278) ≈ 1.0 (초기 identity)
 - 추가 파라미터: `emb_dim × d + d = 64 × 168 + 168 = 10,920`
+- **실측 효과**: char_lm 5 epoch에서 baseline 24.18 → **13.14 ppl** (1.84× 개선, 단일 최대)
 
-### N-gram Bypass: use_bypass
+### 계층적 예측 코딩: n_layers (설계철학 확장)
 
-에너지 상태 독립적인 n-gram 단축로. 로컬 패턴을 직접 예측 분포에 기여.
+에너지 함수를 다층으로 쌓는 정통 predictive coding 구조.
 
 ```
-logits = output_proj(norm_f(x)) + bypass_proj(u_all)  — u_all은 conv처리된 임베딩
+Layer 0: E_0(x_0) = ½‖ũ − g(x_0)‖²      ← 토큰 임베딩을 관측
+Layer l: E_l(x_l) = ½‖x_{l-1} − g(x_l)‖² ← 하위 레이어 상태를 관측 (identity prior)
 ```
 
-- `bypass_proj`: `Linear(emb_dim, vocab_size)`, zeros init → 학습 전 효과 없음
-- use_conv=True와 함께 사용 시 4-gram 컨텍스트를 직접 어휘 분포에 매핑
-- 추가 파라미터: `emb_dim × vocab_size = 64 × 65 = 4,160`
+각 레이어는 독립 PRISMCell + 자체 Hebbian 기억 M_l. 하위 레이어 출력이 상위의 "관측값"이
+되어, 상위 레이어가 더 추상적인 표현으로 에너지를 최소화. 모든 레이어가 동일한
+`E 경사하강` 원칙을 따름 — 설계철학 그대로 깊이만 확장.
+
+### 대각 병렬 K-scan: diag_scan (속도 최적화)
+
+K번 순차 에너지 하강을 닫힌 형식으로 O(1) 계산. Mamba의 parallel scan과 동형이되,
+**같은 에너지 함수를 최소화**하므로 설계철학 준수.
+
+```
+x_{k+1} = (I − αH) x_k + αb       ← 선형 재귀 (H = 대각 Hessian 근사)
+x_K     = aᴷ x_0 + b·(aᴷ−1)/(a−1) ← 닫힌 형식 (a = 1 − αH)
+```
+
+순차 K-step과 최대오차 0.006 (norm 14 대비 0.04%) — 같은 최솟값에 수렴.
 
 ---
 
