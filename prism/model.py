@@ -253,6 +253,8 @@ class PRISMLangModel(nn.Module):
             # 다음 토큰 K 결정을 위해 현재 logits 저장
             if adaptive_K and not is_training:
                 prev_logits = self.output_proj(self.norm_f(x.detach()))
+                if self.use_bypass:
+                    prev_logits = prev_logits + self.bypass_proj(u_raw.detach())
                 all_k_used.append(k_t if k_t is not None else self.cell.K)
 
             all_x.append(x)
