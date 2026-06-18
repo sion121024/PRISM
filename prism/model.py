@@ -293,6 +293,7 @@ class PRISMLangModel(nn.Module):
             u_c = (self.conv_1d.weight.squeeze(1) * buf).sum(-1) + self.conv_1d.bias
             return F.silu(u_c), buf
 
+        _first_tok = True
         for tok in prompt.unbind(1):
             u_raw = self.embed(tok)
             if self.use_conv:
@@ -302,7 +303,9 @@ class PRISMLangModel(nn.Module):
             else:
                 u = u_raw
             x_prior = x if self.simple_prior else (self.cell.prior_mu(x) if self.use_prior else None)
-            x = self.cell.iterate(u, mem, x, K=K_gen, training=False, x_prior=x_prior)
+            x0_gen = None if _first_tok else x
+            x = self.cell.iterate(u, mem, x0_gen, K=K_gen, training=False, x_prior=x_prior)
+            _first_tok = False
             if self.use_gate:
                 x = x * F.silu(self.gate_proj(u_raw))
             mem = self.cell.update_memory(x, mem)
