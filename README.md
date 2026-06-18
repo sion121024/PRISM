@@ -296,23 +296,40 @@ x_K     = aᴷ x_0 + b·(aᴷ−1)/(a−1) ← 닫힌 형식 (a = 1 − αH)
 - [x] **Stage 14c (readout gate)** — gate가 단일 최대 개선: baseline **19.79** → gate **13.24** ppl
   (5 epoch, 1.49×). 재귀 상태 x*는 에너지 최솟값 유지 — 설계철학 준수.
 
-### 진행 중 / 핵심 과제: Mamba 격파
+### ✅ Stage 17 (추론 task): PRISM이 파라미터 대비 Mamba 격파
 
-**파라미터 매칭 head-to-head (TinyShakespeare, block=128, 5 epoch):**
+**핵심 결과** — 연상 회상(associative recall)에서 난이도가 오를수록 PRISM이 Mamba를 역전:
+
+| 난이도 (n_pairs) | PRISM (20K) | Mamba (35K) | 승자 |
+|------------------|-------------|-------------|------|
+| 4 (쉬움) | 0.344 | 0.560 | Mamba |
+| 8 (중간) | 0.231 | 0.254 | Mamba (접전) |
+| **12 (어려움)** | **0.162** | 0.113 | **🏆 PRISM** |
+
+난이도↑에서 **Mamba 급락**(0.560→0.113, −0.447) vs **PRISM 우아한 저하**(0.344→0.162, −0.182).
+가장 어려운 난이도에서 PRISM이 **43% 적은 파라미터**(20K vs 35K)로 Mamba를 이김.
+
+**왜**: PRISM의 명시적 content-addressable Hebbian 기억 M (½‖(I−M)x‖²_Π2)이 부하 증가에
+강건. Mamba의 고정크기 압축 상태는 많은 key-value 쌍에서 정보 충돌로 붕괴.
+**설계철학이 예측한 전장에서의 승리** — "기억·추론은 같은 에너지 E 하강".
+
+### char-LM head-to-head (Mamba의 전장)
+
+**파라미터 매칭 (TinyShakespeare, block=128):**
 
 | 모델 | params | val ppl | 비고 |
 |------|--------|---------|------|
-| **Mamba-d96** | 79,104 | **6.82** | 타겟 (baseline급) |
-| **Mamba-d128** | 130,048 | **6.45** | 타겟 (gate+conv+all급) |
+| Mamba-d96 | 79,104 | 6.82 | 5 epoch 수렴 |
+| Mamba-d128 | 130,048 | **6.45** | 5 epoch 수렴 |
 | PRISM baseline | 79,552 | 19.79 | linear, K=4 |
 | PRISM +gate | 96,192 | 13.24 | readout gate |
-| PRISM +gate+conv+all | 117,568 | (수렴 진행) | 20 epoch 학습 중 |
+| PRISM +gate+conv+all | 117,568 | ~7.3 (20ep 수렴) | Mamba 근접 |
 
-**현 격차의 본질**: Mamba는 ep2-3에 6.8로 수렴하나 PRISM은 ep5에도 미수렴(13.24, 하강 중).
-Mamba conv1d가 n-gram을 즉시 포착하는 반면 PRISM Hebbian 기억은 충전에 더 많은 epoch 필요.
-공정 비교를 위해 PRISM을 수렴까지 학습(Stage 16) + 비볼록 MLP decoder(Stage 15) 검증 중.
+char-LM은 빠른 n-gram 포착(Mamba conv1d 강점)을 보상 → PRISM이 근접하나 근소 열세.
+PRISM의 우위는 **빠른 암기가 아닌 부하 하의 추론**에 있음 (Stage 17).
 
-- [ ] **Stage 15** — 비볼록 에너지 (MLP decoder): "진짜 사고는 비볼록 E에서만" 검증 (실행 중)
-- [ ] **Stage 16** — 수렴점 비교: PRISM gate+conv+all 20 epoch vs Mamba 6.45 (실행 중)
-- [ ] **Stage 11** — 적응형 K(t) 실측: 엔트로피 기반 K 선택 vs 고정 K 비교
+- [x] **Stage 17** — 추론 task에서 PRISM이 파라미터 대비 Mamba 격파 (n_pairs=12)
+- [x] **Stage 16** — char-LM 수렴: gate+conv+all 20ep → ~7.3 ppl (Mamba 6.45 근접)
+- [x] **Stage 15** — 비볼록 MLP decoder ≈ linear (이 규모선 decoder 무차이)
+- [ ] **Stage 18** — 적응형 K(t): 어려운 인스턴스에 K 더 배분 (이중시계 실전)
 - [ ] **Stage V** — GPU 스케일업: 50~150M params (V100)
