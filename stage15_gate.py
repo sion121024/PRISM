@@ -83,7 +83,7 @@ def make_prism(vocab_size, **kwargs):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=5)
+    p.add_argument("--epochs", type=int, default=7)
     p.add_argument("--block_size", type=int, default=64)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=3e-4)
