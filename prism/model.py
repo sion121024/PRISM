@@ -311,7 +311,10 @@ class PRISMLangModel(nn.Module):
 
         generated = prompt.tolist()
         for _ in range(max_new_tokens):
-            logits = self.output_proj(self.norm_f(x)) / temperature
+            logits = self.output_proj(self.norm_f(x))
+            if self.use_bypass:
+                logits = logits + self.bypass_proj(u_raw)
+            logits = logits / temperature
             if top_k is not None:
                 topk_val = torch.topk(logits, top_k, dim=-1).values
                 logits = logits.masked_fill(logits < topk_val[:, -1:], -1e9)
