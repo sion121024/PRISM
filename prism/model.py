@@ -81,6 +81,7 @@ class PRISMLangModel(nn.Module):
             input_dep_pi=input_dep_pi,
             momentum=momentum,
         )
+        self.norm_f = nn.LayerNorm(d)       # Mamba/GPT-2 style pre-unembed norm
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
         if use_urec:
@@ -201,7 +202,7 @@ class PRISMLangModel(nn.Module):
 
             # 다음 토큰 K 결정을 위해 현재 logits 저장
             if adaptive_K and not is_training:
-                prev_logits = self.output_proj(x.detach())
+                prev_logits = self.output_proj(self.norm_f(x.detach()))
                 all_k_used.append(k_t if k_t is not None else self.cell.K)
 
             all_x.append(x)
@@ -211,7 +212,7 @@ class PRISMLangModel(nn.Module):
 
         # Batch output projection: one call instead of T-1 calls
         x_stacked = torch.stack(all_x, dim=1)          # [B, T-1, d]
-        logits_all = self.output_proj(x_stacked)        # [B, T-1, vocab_size]
+        logits_all = self.output_proj(self.norm_f(x_stacked))  # [B, T-1, vocab_size]
 
         targets = tokens[:, 1:]
         loss = F.cross_entropy(
@@ -257,7 +258,7 @@ class PRISMLangModel(nn.Module):
 
         generated = prompt.tolist()
         for _ in range(max_new_tokens):
-            logits = self.output_proj(x) / temperature
+            logits = self.output_proj(self.norm_f(x)) / temperature
             if top_k is not None:
                 topk_val = torch.topk(logits, top_k, dim=-1).values
                 logits = logits.masked_fill(logits < topk_val[:, -1:], -1e9)
