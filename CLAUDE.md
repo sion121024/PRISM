@@ -67,6 +67,8 @@ python train.py --task char_lm --epochs 20 --baseline lstm
 | `use_urec` | True | 관측 증강 ũ=f([u, x_prev]) (필수) |
 | `input_dep_pi` | False | 선택적 precision Π1(u),Π2(u) ≈ Mamba B/C |
 | `momentum` | 0.0 | K-step Heavy-ball β (0.9 권장) |
+| `use_conv` | False | Depthwise conv1d n-gram 패턴 캡처 (Mamba 유사체, +320 params) |
+| `d_conv` | 4 | conv1d 커널 크기 |
 
 ## CPU 성능 최적화
 

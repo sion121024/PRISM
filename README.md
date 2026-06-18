@@ -163,6 +163,8 @@ python verify_convergence.py
 | `use_urec` | True | 관측 증강 ũ = f([u_raw, x_prev]) (필수) |
 | `input_dep_pi` | False | 선택적 precision Π1(u), Π2(u) — Mamba 유사체 |
 | `momentum` | 0.0 | K-step Heavy-ball β (0.9 권장, 0=끔) |
+| `use_conv` | False | Depthwise conv1d n-gram 패턴 캡처 (+320 params, Mamba 유사체) |
+| `d_conv` | 4 | conv1d 커널 크기 |
 
 ### Selective PRISM: input_dep_pi
 
@@ -183,7 +185,19 @@ m = PRISMLangModel(..., input_dep_pi=True)
 
 # K-step Heavy-ball 추가 (파라미터 0 추가)
 m = PRISMLangModel(..., input_dep_pi=True, momentum=0.9)
+
+# 전체 (conv + sel + mom + prior_bias)
+m = PRISMLangModel(..., use_conv=True, input_dep_pi=True, momentum=0.9, prior_bias=True)
 ```
+
+### Local Conv1d: use_conv
+
+Mamba의 causal depthwise conv1d를 에너지 관측 전처리에 추가.
+char LM에서 "th"→"e", "ing", "tion" 같은 로컬 n-gram 패턴을 효율적으로 포착.
+
+- 학습: vectorized `Conv1d(emb_dim, emb_dim, k=4, groups=emb_dim)` — 전체 시퀀스 일괄처리
+- 생성: 순차 conv buffer — 마지막 d_conv 토큰 유지
+- 추가 파라미터: `emb_dim × d_conv + emb_dim = 64 × 4 + 64 = 320` (매우 저렴)
 
 ---
 
