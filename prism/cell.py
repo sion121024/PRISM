@@ -123,6 +123,7 @@ class PRISMCell(nn.Module):
         simple_prior: bool = False,  # True → μ = x_prev (identity prior)
         prior_bias: bool = False,    # True → μ = x_prev + b (d params, 빠른 수렴)
         input_dep_pi: bool = False,  # True → Π1(u), Π2(u) — 선택적 precision (Mamba 유사체)
+        momentum: float = 0.0,       # Heavy-ball 모멘텀 β (0=끔, 0.9=권장)
     ):
         super().__init__()
         assert memory_mode in ("sliding", "full_M", "none")
@@ -183,6 +184,8 @@ class PRISMCell(nn.Module):
         # 입력 의존 precision (Mamba 선택적 메커니즘 유사체)
         # Mamba: B(x), C(x) — PRISM: Π1(u), Π2(u)
         # 모든 토큰에 동일 precision 대신 입력에 따라 지각/기억 가중치 조절
+        self.momentum = momentum
+
         self.input_dep_pi = input_dep_pi
         if input_dep_pi:
             self.pi1_gate = nn.Linear(emb_dim, emb_dim)
@@ -413,9 +416,18 @@ class PRISMCell(nn.Module):
 
         # Full backprop (기본) — raw x 공간에서 정확한 에너지 경사하강
         with torch.set_grad_enabled(training):
-            for _ in range(K):
-                x = x + self.alpha * self._neg_grad_E(
-                    x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
+            if self.momentum > 0.0:
+                # Heavy-ball: v_{k+1} = β v_k + α g_k,  x_{k+1} = x_k + v_{k+1}
+                v = x.new_zeros(x.shape)
+                for _ in range(K):
+                    g = self._neg_grad_E(
+                        x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
+                    v = self.momentum * v + self.alpha * g
+                    x = x + v
+            else:
+                for _ in range(K):
+                    x = x + self.alpha * self._neg_grad_E(
+                        x, u, mem_state, x_prior, _pi1=_pi1, _pi2=_pi2, _pi3=_pi3)
         return x
 
     def _rms(self, x: torch.Tensor) -> torch.Tensor:
