@@ -134,7 +134,7 @@ def build_tokenizer(corpus_text, vocab_size, cache="/tmp/bbpe"):
         f.write(corpus_text)
     tok = ByteLevelBPETokenizer()
     tok.train(files=[txt_path], vocab_size=vocab_size, min_frequency=2,
-              special_tokens=["<pad>", "<bos>", "<eos>"])
+              special_tokens=["<pad>", "<bos>", "<eos>", "<ko>", "<en>"])
     return tok
 
 
@@ -143,11 +143,17 @@ def build_tokenizer(corpus_text, vocab_size, cache="/tmp/bbpe"):
 # ------------------------------------------------------------------ #
 
 class TokenDataset(Dataset):
-    def __init__(self, ids, block_size, stride=None):
+    def __init__(self, ids, block_size, stride=None, tag_id=None):
         stride = stride or block_size
         t = torch.tensor(ids, dtype=torch.long)
-        self.chunks = [t[i:i + block_size + 1]
-                       for i in range(0, len(t) - block_size - 1, stride)]
+        if tag_id is None:
+            self.chunks = [t[i:i + block_size + 1]
+                           for i in range(0, len(t) - block_size - 1, stride)]
+        else:
+            # 각 청크 앞에 언어 태그를 붙여 생성 시 언어를 앵커링 (코드스위칭 억제)
+            tg = torch.tensor([tag_id], dtype=torch.long)
+            self.chunks = [torch.cat([tg, t[i:i + block_size]])
+                           for i in range(0, len(t) - block_size, stride)]
 
     def __len__(self):
         return len(self.chunks)
@@ -165,15 +171,19 @@ def evaluate(model, loader, device):
     return math.exp(tot / max(nb, 1))   # perplexity
 
 
-def sample(model, tok, seed, device, n=60, temperature=0.6, top_k=40, rep=1.3):
+def sample(model, tok, seed, device, n=60, temperature=0.6, top_k=40, rep=1.3,
+           tag_id=None):
     model.eval()
-    ids = tok.encode(seed).ids
-    if not ids:
-        ids = [0]
+    ids = tok.encode(seed).ids or [0]
+    if tag_id is not None:
+        ids = [tag_id] + ids                 # 언어 태그로 앵커링
     prompt = torch.tensor([ids], dtype=torch.long, device=device)
     out = model.generate(prompt, max_new_tokens=n, temperature=temperature,
                          top_k=top_k, repetition_penalty=rep)
-    return tok.decode(out[0].tolist())
+    gen = out[0].tolist()
+    if tag_id is not None and gen and gen[0] == tag_id:
+        gen = gen[1:]                        # 태그 토큰은 디코드에서 제외
+    return tok.decode(gen)
 
 
 def main():
@@ -192,6 +202,7 @@ def main():
     p.add_argument("--vocab", type=int, default=12000)
     p.add_argument("--ko_mb", type=int, default=25)
     p.add_argument("--en_mb", type=int, default=25)
+    p.add_argument("--lang_tags", type=int, default=1, help="언어 태그 토큰 앵커링(1/0)")
     p.add_argument("--amp", action="store_true", default=True)
     p.add_argument("--max_steps", type=int, default=0)
     p.add_argument("--save", default="")
@@ -224,19 +235,24 @@ def main():
     vocab = tok.get_vocab_size()
     print(f"ByteLevel BPE vocab={vocab} ({time.time()-t0:.0f}s)", flush=True)
 
+    ko_tag = tok.token_to_id("<ko>") if args.lang_tags else None
+    en_tag = tok.token_to_id("<en>") if args.lang_tags else None
+
     def split_ids(text, frac=0.98):
         ids = tok.encode(text).ids
         n = int(len(ids) * frac)
         return ids[:n], ids[n:]
     ko_tr, ko_va = split_ids(ko)
     en_tr, en_va = split_ids(en)
-    train_ids = ko_tr + en_tr
-    print(f"train_tokens={len(train_ids):,} | ko_val={len(ko_va):,} | en_val={len(en_va):,}",
-          flush=True)
+    print(f"train_tokens={len(ko_tr)+len(en_tr):,} | ko_val={len(ko_va):,} | "
+          f"en_val={len(en_va):,} | lang_tags={args.lang_tags}", flush=True)
 
-    train_ds = TokenDataset(train_ids, args.block_size)
-    ko_val = TokenDataset(ko_va, args.block_size)
-    en_val = TokenDataset(en_va, args.block_size)
+    # 언어별 태그 청크를 만들어 합침 (각 청크가 자기 언어 태그로 시작)
+    ko_ds = TokenDataset(ko_tr, args.block_size, tag_id=ko_tag)
+    en_ds = TokenDataset(en_tr, args.block_size, tag_id=en_tag)
+    train_ds = torch.utils.data.ConcatDataset([ko_ds, en_ds])
+    ko_val = TokenDataset(ko_va, args.block_size, tag_id=ko_tag)
+    en_val = TokenDataset(en_va, args.block_size, tag_id=en_tag)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=2, drop_last=True)
     ko_loader = DataLoader(ko_val, batch_size=args.batch_size)
@@ -276,14 +292,14 @@ def main():
         mem = (torch.cuda.max_memory_allocated() / 1e9) if device.type == "cuda" else 0.0
         print(f"ep {epoch:2d} | loss {ep_loss/nb:.4f} | 한국어 ppl {ko_ppl:.2f} | "
               f"영어 ppl {en_ppl:.2f} | {time.time()-t0:.0f}s | {mem:.1f}GB", flush=True)
-        print("  [KO] " + sample(model, tok, "오늘", device, 50).replace("\n", " ⏎ "), flush=True)
-        print("  [EN] " + sample(model, tok, "The ", device, 50).replace("\n", " ⏎ "), flush=True)
+        print("  [KO] " + sample(model, tok, "오늘", device, 50, tag_id=ko_tag).replace("\n", " ⏎ "), flush=True)
+        print("  [EN] " + sample(model, tok, "The ", device, 50, tag_id=en_tag).replace("\n", " ⏎ "), flush=True)
 
     print("\n" + "=" * 64 + "\n최종 생성 샘플:")
     for s in ["오늘 날씨는", "나는 어제", "한국의 수도는"]:
-        print(f"  [KO '{s}'] " + sample(model, tok, s, device, 80).replace("\n", " ⏎ "))
+        print(f"  [KO '{s}'] " + sample(model, tok, s, device, 80, tag_id=ko_tag).replace("\n", " ⏎ "))
     for s in ["The president", "In the morning", "She said that"]:
-        print(f"  [EN '{s}'] " + sample(model, tok, s, device, 80).replace("\n", " ⏎ "))
+        print(f"  [EN '{s}'] " + sample(model, tok, s, device, 80, tag_id=en_tag).replace("\n", " ⏎ "))
 
     if args.save:
         torch.save({"model": model.state_dict(), "args": vars(args)}, args.save)
