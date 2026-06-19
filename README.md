@@ -8,13 +8,14 @@
 
 ## 핵심 성과 요약
 
-| 항목 | 결과 |
-|------|------|
-| 추론 (연상회상 n_pairs=12) | **PRISM 0.151 vs Mamba 0.110** — 적은 파라미터로 Mamba 격파 (Stage 17/19b) |
-| char-LM perplexity | PRISM 7.58 vs Mamba 6.45 — 근접 (17% 차, params 10% 적음) |
-| diag_scan 속도 | K=64에서 **151× 가속**, 오차 0.4% |
-| 이중시계 | 추론 K↑ → ppl↓ 단조 확인 (K=1: 28.67 → K=16: 28.24) |
-| PRISM vs LSTM | -1.222 ppl 우위 (동등 파라미터) |
+| 항목 | 결과 | 신뢰도 |
+|------|------|--------|
+| 추론 vs Mamba (n_pairs=12) | PRISM 수치 우세 (0.151 vs 0.110, 25ep 단일시드) | ⚠ 통계적 미입증 (p=0.31) |
+| 추론 vs GRU (n_pairs=12) | GRU-d52가 PRISM보다 빠르게 수렴 (15ep: 0.146 vs 0.112) | ✅ 다중 시드 확인 |
+| char-LM perplexity | PRISM 7.58 vs Mamba 6.45 — 17% 열세 (params 10% 적음) | ✅ |
+| diag_scan 속도 | K=64에서 **151× 가속**, 오차 0.4% | ✅ |
+| 이중시계 (K↑→성능↑) | K=1→16: ppl 28.67→28.24 단조 감소 | ✅ |
+| PRISM vs LSTM (char-LM) | -1.222 ppl 우위 (동등 파라미터, 단일 시드) | ⚠ 통계적 미입증 |
 
 ---
 
@@ -241,22 +242,44 @@ K2→K4: **1.765 ppl 개선** — "더 많이 생각 = 더 똑똑" 실증.
 
 ---
 
-### Stage 20 — 통계적 검증 (다중 시드 + 4개 베이스라인) 🔄
+### Stage 20 — 통계적 검증 (다중 시드 + 4개 베이스라인) ✅
 
-**목적**: Stage 17/19b의 단일 시드 결과를 통계적으로 검증  
 **실험 조건**: n_pairs=12, epochs=15, BS=128, LR=3e-4, seeds=[0,1,2]  
-**베이스라인**: PRISM, Mamba-d48, GRU-d52, Transformer-d40 (파라미터 유사 범위)  
-**환경**: CPU x86_64 4코어, RAM 15GB, PyTorch 2.12.0
+**베이스라인**: PRISM, Mamba-d48, GRU-d52, Transformer-d40  
+**환경**: CPU x86_64 4코어, RAM 15GB, PyTorch 2.12.0  
+**소요시간**: 2262s
 
-| 모델 | params | seed0 | seed1 | seed2 | mean ± std |
-|------|--------|-------|-------|-------|------------|
-| PRISM | 20,320 | — | — | — | 실행 중 |
-| Mamba-d48 | 21,840 | — | — | — | 실행 중 |
-| GRU-d52 | ~22,000 | — | — | — | 실행 중 |
-| Transformer-d40 | ~20,000 | — | — | — | 실행 중 |
+#### 결과 (mean ± std, n=3 seeds)
 
-> 재현: `python stage20_statistical.py` (소요 ~50분, CPU)  
-> 전체 통계 결과는 실행 완료 후 업데이트 예정
+| 순위 | 모델 | params | seed0 | seed1 | seed2 | mean ± std |
+|------|------|--------|-------|-------|-------|------------|
+| 1 | **GRU-d52** | 19,188 | 0.150 | 0.144 | 0.143 | **0.146 ± 0.004** |
+| 2 | Transformer-d40 | 38,760 | 0.123 | 0.141 | 0.128 | 0.131 ± 0.009 |
+| 3 | PRISM | 20,320 | 0.096 | 0.135 | 0.104 | 0.112 ± 0.021 |
+| 4 | Mamba-d48 | 21,840 | 0.093 | 0.089 | 0.105 | 0.095 ± 0.008 |
+
+#### Welch's t-test (PRISM vs 각 베이스라인)
+
+| 비교 | Δ | t | p-value | 결론 |
+|------|---|---|---------|------|
+| PRISM vs Mamba | +0.016 | +1.27 | 0.3063 | **비유의** — 수치 우세이나 미입증 |
+| PRISM vs GRU | -0.034 | -2.81 | 0.0989 | GRU 우세 (p<0.10) |
+| PRISM vs Transformer | -0.019 | -1.44 | 0.2527 | 비유의 |
+
+#### 해석 및 수정된 주장
+
+**Stage 17/19b (25 epochs, 단일 시드) 재검토:**
+- Stage 19b에서 PRISM 0.151 vs Mamba 0.110은 **25 에포크**에서 나온 결과
+- 15 에포크 비교에서 PRISM 0.112 ± 0.021 vs Mamba 0.095 ± 0.008 → 방향 같으나 **통계적 유의성 없음**
+- **새 발견**: GRU (0.146)가 n_pairs=12에서 PRISM/Mamba보다 빠르게 수렴
+- PRISM의 분산(±0.021)이 GRU(±0.004)보다 크다 → 수렴 불안정성 시사
+
+**수정된 주장:**
+- ~~"PRISM이 파라미터 대비 Mamba를 격파"~~ (단일 시드, 25 에포크 기준)
+- → "PRISM은 Mamba보다 수치적으로 우세하나 **통계적으로 미입증**. GRU가 이 규모에서 가장 효율적."
+- 공정한 비교를 위해 **25 에포크 × 3 seeds + GRU 포함** 실험 필요 (Stage 21 계획)
+
+> 재현: `python stage20_statistical.py` (~38분, CPU)
 
 ---
 
@@ -458,6 +481,8 @@ python train.py --task assoc_recall --epochs 20 --n_pairs 8 --K 4 --d 128
 - [x] **Stage 17** — 추론 Mamba 격파: n_pairs=12, 43% 적은 params로 승
 - [x] **Stage 19b** — 공정 매칭 재확인: 승리 견고
 - [x] **diag_scan** — O(1) K-step: 151× 가속
+- [x] **Stage 20** — 통계적 검증: 3 seeds × 4 모델. GRU > Transformer > PRISM > Mamba (15ep). PRISM vs Mamba 유의성 미달.
+- [ ] **Stage 21** — 25 epochs × 3 seeds × GRU 포함 공정 비교 (주장 재검증)
 - [ ] **Stage 18** — 적응형 K(t): 어려운 인스턴스에 K 더 배분
 - [ ] **Stage 4 (GPU)** — 50~150M params 스케일업 (Kaggle GPU 필요)
 - [ ] **Stage 5** — 비전/행동 어댑터
