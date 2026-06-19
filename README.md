@@ -398,7 +398,7 @@ Mamba-d136(140K), key/val_vocab=32:
 - **유창성**(`stage23_bilingual_fluent.py`): ByteLevel BPE 서브워드 + 12M params로
   **문장 수준 유창성**. 영어 Simple English Wikipedia로 깨끗한 산문(ppl 112),
   한국어 자연스러운 문장(ppl 295). 에너지 코어 불변, 입력만 바이트→서브워드.
-  언어 태그(`<ko>`/`<en>`)로 코드스위칭 억제, `generate()` repetition_penalty 추가.
+  언어 태그(`<ko>`/`<en>`)로 코드스위칭 해결(v3 확인), `generate()` repetition_penalty 추가.
 
 ### 🖼️ Stage 5 (멀티모달 + 행동 슬롯)
 
