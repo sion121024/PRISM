@@ -241,6 +241,25 @@ K2→K4: **1.765 ppl 개선** — "더 많이 생각 = 더 똑똑" 실증.
 
 ---
 
+### Stage 20 — 통계적 검증 (다중 시드 + 4개 베이스라인) 🔄
+
+**목적**: Stage 17/19b의 단일 시드 결과를 통계적으로 검증  
+**실험 조건**: n_pairs=12, epochs=15, BS=128, LR=3e-4, seeds=[0,1,2]  
+**베이스라인**: PRISM, Mamba-d48, GRU-d52, Transformer-d40 (파라미터 유사 범위)  
+**환경**: CPU x86_64 4코어, RAM 15GB, PyTorch 2.12.0
+
+| 모델 | params | seed0 | seed1 | seed2 | mean ± std |
+|------|--------|-------|-------|-------|------------|
+| PRISM | 20,320 | — | — | — | 실행 중 |
+| Mamba-d48 | 21,840 | — | — | — | 실행 중 |
+| GRU-d52 | ~22,000 | — | — | — | 실행 중 |
+| Transformer-d40 | ~20,000 | — | — | — | 실행 중 |
+
+> 재현: `python stage20_statistical.py` (소요 ~50분, CPU)  
+> 전체 통계 결과는 실행 완료 후 업데이트 예정
+
+---
+
 ### Stage 19b — 공정 파라미터 매칭 추론 재확인 ✅
 
 (Stage 17은 Mamba가 35K로 75% 큼 → Mamba-d48(21.8K)로 공정 재실험)
@@ -339,6 +358,66 @@ stage16_converge.py
 | `approximate_grad` | False | K-1 no_grad + 1 grad (역전파 1/K 축소) |
 
 ---
+
+## 실험 환경
+
+| 항목 | 값 |
+|------|----|
+| CPU | x86_64 (4코어) |
+| RAM | 15GB |
+| GPU | 없음 (CPU 전용) |
+| PyTorch | 2.12.0+cu130 |
+| Python | 3.11 |
+| torch.set_num_threads | 1 (멀티스레드 오버헤드 방지) |
+| 배치 크기 | 128 |
+| 학습률 | 3e-4 (AdamW, weight_decay=1e-4) |
+| 스케줄러 | CosineAnnealingLR |
+| gradient clip | 1.0 |
+
+> **재현 시드**: 각 실험은 `torch.manual_seed(seed)` 고정. 다중 시드 실험은 seed=0,1,2 사용.
+
+## 재현 방법
+
+```bash
+# 의존성 설치
+pip install torch scipy
+
+# 에너지 수렴 검증
+python verify_convergence.py
+
+# 핵심 추론 실험 (Stage 19b, 단일 시드)
+python stage19b_reasoning_fair.py
+
+# 통계적 검증 (3 seeds × 4 모델, ~1시간 소요)
+python stage20_statistical.py
+
+# diag_scan 속도 벤치마크
+python bench_diag_scan.py
+
+# char-LM 학습 (20 epochs)
+python train.py --task char_lm --epochs 20 --K 4 --d 128 --use_gate
+```
+
+## 오류 분석 (PRISM 실패/성공 조건)
+
+### PRISM이 지는 조건
+| 조건 | 원인 |
+|------|------|
+| char-LM (모든 난이도) | Mamba conv1d의 즉각적 n-gram 포착. PRISM은 수십 epoch 워밍업 필요 |
+| 쉬운 추론 (n_pairs ≤ 8) | Mamba/GRU가 빠른 패턴 매칭으로 선제 수렴 |
+| 극도로 어려운 추론 (n_pairs ≥ 16, 20K 규모) | 양쪽 모두 붕괴 — 모델 크기 부족 |
+
+### PRISM이 이기는 조건
+| 조건 | 원인 |
+|------|------|
+| 어려운 추론 (n_pairs=12) | 명시적 Hebbian 기억이 Mamba 압축 상태를 압도 |
+| 장거리 content-addressable 기억 | M이 정보 충돌 없이 key-value 쌍 유지 |
+| 추론 시 추가 계산 | K↑ → 성능 향상 (Mamba/GRU에 없는 이중시계 능력) |
+
+### 설계 한계
+- **소규모(20K)**: n_pairs > 12 태스크 불가 → GPU 스케일업 필요
+- **통계 기반**: 현재 3 seeds (CPU 제약). GPU 환경에서 5+ seeds 권장
+- **단일 태스크**: 연상회상에서 검증. 추가 태스크(QA, 긴 문맥 이해 등) 미검증
 
 ## 빠른 실행
 
