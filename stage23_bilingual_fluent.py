@@ -59,6 +59,37 @@ def read_text(path, n_bytes, skip=1_000_000):
         return f.read(n_bytes).decode("utf-8", errors="ignore")
 
 
+def collect_files(substr, n_bytes, name_prefix=None):
+    """경로에 substr 포함된 파일들을 정렬·연결해 n_bytes까지 읽음 (다중 파일)."""
+    root = "/kaggle/input"
+    if not os.path.isdir(root):
+        return None
+    paths = []
+    for dp, _, files in os.walk(root):
+        for f in files:
+            full = os.path.join(dp, f)
+            if substr in full.lower() and (name_prefix is None or f.startswith(name_prefix)):
+                if f.lower().endswith((".txt", ".tokens", ".raw")) or name_prefix:
+                    paths.append(full)
+    if not paths:
+        return None
+    paths.sort()
+    buf, got = [], 0
+    for p in paths:
+        with open(p, "rb") as f:
+            chunk = f.read(n_bytes - got)
+        buf.append(chunk); got += len(chunk)
+        if got >= n_bytes:
+            break
+    return b"".join(buf).decode("utf-8", errors="ignore")
+
+
+def clean_en(t):
+    # WikiText 토큰화 아티팩트 정리
+    return (t.replace(" @-@ ", "-").replace(" @,@ ", ",").replace(" @.@ ", ".")
+             .replace(" @-@", "-"))
+
+
 def load_korean(n_bytes):
     p = find_largest(["kcbert", "korean", "namu"])
     if p:
@@ -69,7 +100,16 @@ def load_korean(n_bytes):
 
 
 def load_english(n_bytes):
-    p = find_largest(["enwik8-train", "enwik8_train"]) or find_largest(["enwik8"])
+    # 우선순위: Simple English Wiki(쉬움·깨끗) > WikiText-103 > enwik8 > github
+    t = collect_files("simpleenglish", n_bytes, name_prefix="wiki_")
+    if t:
+        print("English: Simple English Wikipedia", flush=True)
+        return t
+    p = find_largest(["wiki.train"], (".tokens", ".txt", ".raw"))
+    if p:
+        print(f"English: {p}", flush=True)
+        return clean_en(read_text(p, n_bytes, skip=300_000))
+    p = find_largest(["enwik8-train"]) or find_largest(["enwik8"])
     if p:
         print(f"English: {p}", flush=True)
         return read_text(p, n_bytes)
@@ -125,13 +165,14 @@ def evaluate(model, loader, device):
     return math.exp(tot / max(nb, 1))   # perplexity
 
 
-def sample(model, tok, seed, device, n=60, temperature=0.7, top_k=40):
+def sample(model, tok, seed, device, n=60, temperature=0.6, top_k=40, rep=1.3):
     model.eval()
     ids = tok.encode(seed).ids
     if not ids:
         ids = [0]
     prompt = torch.tensor([ids], dtype=torch.long, device=device)
-    out = model.generate(prompt, max_new_tokens=n, temperature=temperature, top_k=top_k)
+    out = model.generate(prompt, max_new_tokens=n, temperature=temperature,
+                         top_k=top_k, repetition_penalty=rep)
     return tok.decode(out[0].tolist())
 
 

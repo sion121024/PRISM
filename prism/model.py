@@ -353,6 +353,7 @@ class PRISMLangModel(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         K_gen: Optional[int] = None,
+        repetition_penalty: float = 1.0,
     ) -> torch.Tensor:
         B = prompt.shape[0]
         device = prompt.device
@@ -436,6 +437,17 @@ class PRISMLangModel(nn.Module):
                 if self.use_gate and last_u_embed is not None:
                     h = h * F.silu(self.gate_proj(last_u_embed))
                 logits = self.output_proj(h)
+
+            # 반복 패널티: 이미 생성된 토큰의 로짓을 감쇠 (degenerate 반복 억제)
+            if repetition_penalty and repetition_penalty != 1.0:
+                for b in range(B):
+                    seen = set(generated[b])
+                    if seen:
+                        idx = torch.tensor(list(seen), device=device)
+                        lb = logits[b].index_select(0, idx)
+                        lb = torch.where(lb > 0, lb / repetition_penalty,
+                                         lb * repetition_penalty)
+                        logits[b].index_copy_(0, idx, lb)
 
             logits = logits / temperature
             if top_k is not None:
