@@ -187,6 +187,11 @@ class PRISMAgentModel(nn.Module):
         self.u_rec2 = nn.Linear(emb_dim, emb_dim, bias=False)
         self.output_proj = nn.Linear(d, vocab_size, bias=False)
 
+        # 결정 토큰: 시퀀스를 다 읽은 뒤 "행동을 정하라"는 마커.
+        # 이 스텝의 상태는 다음 문자 예측이 아니라 누적 기억 + 지속 시각으로부터
+        # 행동을 만족시키도록 하강한다 (assoc_recall의 query 토큰과 동형).
+        self.decision_emb = nn.Parameter(torch.randn(emb_dim) * 0.02)
+
         nn.init.normal_(self.embed.weight, std=0.02)
         nn.init.normal_(self.output_proj.weight, std=0.02)
 
@@ -213,29 +218,34 @@ class PRISMAgentModel(nn.Module):
         if (couple_action and self.training and action_labels is not None):
             act_obs = F.one_hot(action_labels, self.n_actions).float()
 
+        # --- 1단계: 텍스트 시퀀스 지각 (시각 동반) ---
         steps = u_all.shape[1]
         all_x = []
         for t in range(steps):
             u_raw = u_all[:, t]
             u = self.u_rec2(F.gelu(self.u_rec1(torch.cat([u_raw, x], dim=-1))))
             x_prior = self.cell.prior_mu(x) if self.cell.use_prior else None
-
-            # 행동 항은 마지막 스텝에서만 결합 (행동은 시퀀스 단위 결정).
-            a_t = act_obs if (t == steps - 1) else None
-            obs = [v, a_t]
-
+            # 지각 단계: 행동 항은 끔(None). 시각 항만 동반.
             x, mem = self.cell(u, mem, x, training=self.training,
-                               x_prior=x_prior, obs=obs)
+                               x_prior=x_prior, obs=[v, None])
             x = x * x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
             all_x.append(x)
 
-        x_stack = torch.stack(all_x, dim=1)             # [B, steps, d]
-        x_last = all_x[-1]                               # [B, d]
+        # --- 2단계: 결정 토큰 — 누적 기억 + 지속 시각으로부터 행동 하강 ---
+        u_dec = self.u_rec2(F.gelu(self.u_rec1(
+            torch.cat([self.decision_emb.expand(B, -1), x], dim=-1))))
+        x_prior = self.cell.prior_mu(x) if self.cell.use_prior else None
+        x, mem = self.cell(u_dec, mem, x, training=self.training,
+                           x_prior=x_prior, obs=[v, act_obs])
+        x = x * x.pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt()
+        x_decision = x
+
+        x_stack = torch.stack(all_x, dim=1) if all_x else None
 
         result: Dict[str, Any] = {}
 
         # 텍스트 예측 (next-token)
-        if T > 1:
+        if T > 1 and x_stack is not None:
             text_logits = self.output_proj(x_stack)
             text_loss = F.cross_entropy(
                 text_logits.reshape(-1, self.vocab_size),
@@ -243,8 +253,8 @@ class PRISMAgentModel(nn.Module):
             result["text_logits"] = text_logits
             result["text_loss"] = text_loss
 
-        # 행동 읽기: g_act(x*) — 추론 시 행동 항은 꺼져 있음(act_obs=None at eval)
-        action_logits = self.cell.slots[self.SLOT_ACTION].decode(x_last)
+        # 행동 읽기: g_act(x_decision) — 추론 시 행동 항은 꺼져 있음(act_obs=None at eval)
+        action_logits = self.cell.slots[self.SLOT_ACTION].decode(x_decision)
         result["action_logits"] = action_logits
         if action_labels is not None:
             result["action_loss"] = F.cross_entropy(action_logits, action_labels)

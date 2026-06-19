@@ -88,9 +88,9 @@ def collate(batch):
 
 
 def run(model, loader, vloader, epochs, name, device,
-        use_vision=True, couple_action=True):
+        use_vision=True, couple_action=True, lr=5e-4, action_weight=3.0):
     model = model.to(device)
-    opt = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     best_acc, best_ppl = 0.0, float("inf")
     for ep in range(1, epochs + 1):
         model.train()
@@ -98,7 +98,7 @@ def run(model, loader, vloader, epochs, name, device,
             tokens, images, actions = tokens.to(device), images.to(device), actions.to(device)
             out = model(tokens, images, actions,
                         use_vision=use_vision, couple_action=couple_action)
-            loss = out["action_loss"]
+            loss = action_weight * out["action_loss"]
             if "text_loss" in out:
                 loss = loss + out["text_loss"]
             opt.zero_grad(); loss.backward()
@@ -123,12 +123,17 @@ def run(model, loader, vloader, epochs, name, device,
 
 
 def make_model(args, device):
-    return PRISMAgentModel(
+    m = PRISMAgentModel(
         vocab_size=VOCAB_SIZE, n_actions=N_ACT,
         d=args.d, emb_dim=args.emb_dim, K=args.K,
         mem_rank=args.mem_rank, dec_hidden=args.dec_hidden, vis_dim=args.vis_dim,
         img_size=28, patch_size=7, in_channels=1, use_prior=True,
     )
+    # 시각·행동 슬롯 precision 초기화: 약한 신호가 텍스트 항에 묻히지 않도록.
+    with torch.no_grad():
+        m.cell.slots[m.SLOT_VISION].log_pi.fill_(2.5)
+        m.cell.slots[m.SLOT_ACTION].log_pi.fill_(2.5)
+    return m
 
 
 def main():
@@ -140,7 +145,7 @@ def main():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--d", type=int, default=128)
     p.add_argument("--emb_dim", type=int, default=32)
-    p.add_argument("--K", type=int, default=4)
+    p.add_argument("--K", type=int, default=5)
     p.add_argument("--mem_rank", type=int, default=8)
     p.add_argument("--dec_hidden", type=int, default=64)
     p.add_argument("--vis_dim", type=int, default=32)
