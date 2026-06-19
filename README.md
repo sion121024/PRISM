@@ -12,6 +12,11 @@
 - ⚡ **효율**: diag_scan으로 K-step 에너지 하강을 **O(1)** 계산 — K=64에서 **151× 가속**.
 - 🔁 **이중시계**: 추론 시 K를 늘리면 정확도 향상 (Mamba에 없는 적응형 사고 깊이).
 - 📊 char-LM은 Mamba 우위 (PRISM 7.58 vs 6.45) — 빠른 n-gram 포착이 핵심인 전장.
+- 🖼️ **멀티모달**: 텍스트+시각+행동을 *같은 에너지 E의 항*으로 통합(fusion layer 불필요).
+  결정 태스크에서 시각 항이 행동 정확도 +0.49 기여 (Full 0.71 vs No-Vision 0.23).
+- 🌏 **이중언어**: 토크나이저 없이 바이트 단위로 한국어+영어를 한 모델에 동시 학습
+  (Kaggle T4, 한국어 2.84 / 영어 3.41 bpc).
+- ☁️ **GPU 스케일업**: Kaggle 2×T4에서 추론 우위가 스케일에서도 유지(PRISM 4/5 난이도 승, 147K params).
 
 ---
 
@@ -368,5 +373,34 @@ PRISM 명시적 Hebbian 기억은 버팀. Stage 17(Mamba 35K)·19b(공정 21.8K)
 - [x] **Stage 16** — char-LM 수렴: gate+conv+all 20ep → 7.58 ppl (Mamba 6.45 근접)
 - [x] **Stage 15** — 비볼록 MLP decoder ≈ linear (이 규모선 decoder 무차이)
 - [x] **diag_scan** — K-step O(1) 닫힌 형식, 10~151× 가속 (상대오차 0.4%)
-- [ ] **Stage 18** — 적응형 K(t): 어려운 인스턴스에 K 더 배분 (이중시계 실전)
-- [ ] **Stage V** — GPU 스케일업: 50~150M params (V100)
+
+### ☁️ Stage 4 (GPU 스케일업, Kaggle 2×T4)
+
+**추론 스케일업** (`stage21_reasoning_scaleup.py`) — PRISM d=512(147K) vs 공정매칭
+Mamba-d136(140K), key/val_vocab=32:
+
+| n_pairs | PRISM | Mamba | 승자 |
+|---------|-------|-------|------|
+| 8 (쉬움) | 0.199 | 0.316 | Mamba |
+| 12 | 0.148 | 0.088 | 🏆 PRISM |
+| 16 | 0.129 | 0.059 | 🏆 PRISM |
+| 20 | 0.097 | 0.042 | 🏆 PRISM |
+| 24 (어려움) | 0.089 | 0.039 | 🏆 PRISM |
+
+**PRISM 4/5 승** — 부하↑ Mamba 급락(0.316→0.039) vs PRISM 우아한 저하(0.199→0.089).
+추론 우위가 GPU 스케일에서도 유지. (이번 K-sweep은 단조 미재현 — 이 task는 K=1-2 수렴.)
+
+**char-LM 스케일업** (`stage20_gpu_scaleup.py`) — PRISM 4M params가 enwik8에서
+안정 학습(T4 5.4GB, 1378 tok/s). char-LM은 Mamba 우세(Stage 2와 일관).
+
+**🌏 한국어+영어 바이트 LM** (`stage22_bilingual.py`) — 토크나이저 없이 한·영을
+같은 상태에 동시 학습 (614K params, 한국어 2.84 / 영어 3.41 bpc, 한·영 생성 확인).
+
+### 🖼️ Stage 5 (멀티모달 + 행동 슬롯)
+
+`prism/agent.py` — 텍스트+시각+행동을 *같은 에너지 E의 항*으로 통합. 결정 토큰에서
+행동 하강: **Full 0.71 vs No-Vision 0.23**(시각→행동 기여 +0.49). 시각 멀티모달은
+ppl +0.59 개선. "지각·기억·추론·행동 = 같은 E 하강" 실증.
+
+> 주의: 단일 T4 예산상 50~150M은 미도달(~mid scale 4~6M까지 검증). 추론·멀티모달·
+> 이중언어로 설계철학의 핵심 주장(같은 E 하강)을 GPU에서 확인.

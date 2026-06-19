@@ -22,15 +22,28 @@ prism/
   cell.py        # PRISMCell — 에너지 함수, 그래디언트, K-step 반복
   deq.py         # DEQ 솔버 (Anderson acceleration + implicit diff)
   model.py       # PRISMLangModel — 전체 언어 모델
+  multimodal.py  # 시각 항 추가 멀티모달 셀/모델
+  agent.py       # 멀티슬롯 에이전트: 텍스트+시각+행동 = 같은 E의 항 (Stage 5)
 tasks/
   copy_task.py   # Copy sequence task
   assoc_recall.py  # Associative recall task
   char_lm.py     # Character-level LM data
 baselines/
   lstm_lm.py     # LSTM 비교 베이스라인
+  mamba_lm.py    # Mamba(S6) 비교 베이스라인
 train.py         # 학습 스크립트
 verify_convergence.py  # Stage 1 사활 검증: 에너지 수렴 확인
+verify_action.py       # Stage 5: 텍스트+시각+행동 멀티모달 통합 검증
+stage20_gpu_scaleup.py     # Stage 4: enwik8 char-LM GPU 스케일업 (PRISM vs Mamba)
+stage21_reasoning_scaleup.py  # Stage 4: 연상회상 GPU 스케일업 + 이중시계
+stage22_bilingual.py       # Stage 4: 한국어+영어 바이트 단위 LM
 ```
+
+## Kaggle GPU 실행 (Stage 4+)
+
+egress 복구됨. `~/.kaggle/kaggle.json`(레거시 키) 인증, `machine_shape: NvidiaTeslaT4`
+지정(P100은 sm_60이라 Kaggle 기본 torch와 비호환). 데이터셋은 dataset_sources로
+마운트(/kaggle/input). 커널에 PRISM 소스를 base64 tarball로 임베딩해 실행.
 
 ## 빠른 실행
 
@@ -49,6 +62,14 @@ python train.py --task char_lm --epochs 20 --K 2 --block_size 128
 
 # 문자 LM (LSTM 베이스라인)
 python train.py --task char_lm --epochs 20 --baseline lstm
+
+# Stage 5: 멀티모달 행동 슬롯 (CPU, ~15 epoch서 점화)
+python verify_action.py --epochs 15
+
+# Stage 4: GPU 스케일업 (Kaggle T4 — --smoke로 로컬 확인 가능)
+python stage21_reasoning_scaleup.py --smoke   # 추론
+python stage20_gpu_scaleup.py --smoke         # char-LM
+python stage22_bilingual.py --smoke           # 한국어+영어
 ```
 
 ## 핵심 파라미터
@@ -95,8 +116,21 @@ PyTorch 멀티스레드 오버헤드(소형 텐서 문제): 4 threads = 14ms, 1 
 - [x] **Stage 3**: 이중시계·추론 태스크 — **PRISM이 파라미터 대비 Mamba 격파**
   (연상회상 n_pairs=12: PRISM 0.162 vs Mamba 0.113, 43% 적은 params로 승.
    난이도↑에서 Mamba 급락 vs PRISM 우아한 저하. 이중시계: 추론 K↑→ppl↓ 단조 입증)
-- [ ] **Stage 4**: V100/GPU에서 50~150M 스케일업 (Kaggle 연동은 egress 정책 차단 상태)
-- [ ] **Stage 5**: 비전 어댑터 + 행동 슬롯
+- [x] **Stage 4**: GPU 스케일업 (Kaggle 2×T4) — egress 복구, 파이프라인 작동
+  - 추론 스케일업: PRISM d=512(147K) vs 공정매칭 Mamba(140K), key/val_vocab=32.
+    **PRISM 4/5 난이도 승**(n_pairs 12~24). 부하↑ Mamba 급락(0.316→0.039) vs
+    PRISM 우아한 저하(0.199→0.089) — thesis가 GPU 스케일에서도 성립.
+  - char-LM 스케일업: PRISM 4M params가 enwik8에서 안정 학습(T4 5.4GB, 1378 tok/s).
+    char-LM은 Mamba 우세(기존 Stage 2와 일관) — PRISM 강점은 추론.
+  - 한국어+영어 바이트 LM: 614K params로 한·영 동시 학습(한국어 2.84 / 영어 3.41 bpc).
+    토크나이저 없이 두 문자체계를 같은 상태에 압축 — 설계철학 직접 증명.
+  - 주의: 단일 T4 예산상 50~150M은 미도달(~mid scale 4~6M까지 검증).
+    K-sweep 단조성은 char-LM(✓)과 달리 hard reasoning에선 미재현(정직 기록).
+- [x] **Stage 5**: 비전 어댑터 + 행동 슬롯 — **여러 모달리티 = 같은 E의 항**
+  - 시각 멀티모달: 시각 항 추가로 ppl 개선(+0.589, digit caption).
+  - 행동 슬롯(prism/agent.py): 텍스트+시각+행동을 같은 에너지로 통합.
+    decision 토큰으로 행동 하강 → Full 0.71 vs No-Vision 0.23(시각 기여 +0.49).
+    "지각·기억·추론·행동 = 같은 E 하강" 실증. (지연 점화형 학습)
 
 ## 학습 전략
 
