@@ -123,7 +123,11 @@ PyTorch 멀티스레드 오버헤드(소형 텐서 문제): 4 threads = 14ms, 1 
   - char-LM 스케일업: PRISM 4M params가 enwik8에서 안정 학습(T4 5.4GB, 1378 tok/s).
     char-LM은 Mamba 우세(기존 Stage 2와 일관) — PRISM 강점은 추론.
   - 한국어+영어 바이트 LM: 614K params로 한·영 동시 학습(한국어 2.84 / 영어 3.41 bpc).
-    토크나이저 없이 두 문자체계를 같은 상태에 압축 — 설계철학 직접 증명.
+    토크나이저 없이 두 문자체계를 같은 상태에 압축 — 설계철학 직접 증명. (단어 조각 수준)
+  - 유창성(stage23): ByteLevel BPE 서브워드 + 12M params로 한·영 **문장 수준 유창성**.
+    영어 Simple English Wikipedia로 깨끗한 산문 생성(ppl 112), 한국어 자연스러운 문장(ppl 295).
+    에너지 코어 불변, 입력 단위만 바이트→서브워드(시퀀스 단축). 언어 태그(<ko>/<en>)로
+    코드스위칭 억제. generate()에 repetition_penalty 추가.
   - 주의: 단일 T4 예산상 50~150M은 미도달(~mid scale 4~6M까지 검증).
     K-sweep 단조성은 char-LM(✓)과 달리 hard reasoning에선 미재현(정직 기록).
 - [x] **Stage 5**: 비전 어댑터 + 행동 슬롯 — **여러 모달리티 = 같은 E의 항**

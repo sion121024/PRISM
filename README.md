@@ -14,8 +14,8 @@
 - 📊 char-LM은 Mamba 우위 (PRISM 7.58 vs 6.45) — 빠른 n-gram 포착이 핵심인 전장.
 - 🖼️ **멀티모달**: 텍스트+시각+행동을 *같은 에너지 E의 항*으로 통합(fusion layer 불필요).
   결정 태스크에서 시각 항이 행동 정확도 +0.49 기여 (Full 0.71 vs No-Vision 0.23).
-- 🌏 **이중언어**: 토크나이저 없이 바이트 단위로 한국어+영어를 한 모델에 동시 학습
-  (Kaggle T4, 한국어 2.84 / 영어 3.41 bpc).
+- 🌏 **이중언어**: 한국어+영어를 한 모델·한 상태에 동시 학습. 서브워드 12M 모델로
+  **문장 수준 유창성** 달성 (영어 ppl 112, 한국어 ppl 295; Kaggle T4).
 - ☁️ **GPU 스케일업**: Kaggle 2×T4에서 추론 우위가 스케일에서도 유지(PRISM 4/5 난이도 승, 147K params).
 
 ---
@@ -393,8 +393,12 @@ Mamba-d136(140K), key/val_vocab=32:
 **char-LM 스케일업** (`stage20_gpu_scaleup.py`) — PRISM 4M params가 enwik8에서
 안정 학습(T4 5.4GB, 1378 tok/s). char-LM은 Mamba 우세(Stage 2와 일관).
 
-**🌏 한국어+영어 바이트 LM** (`stage22_bilingual.py`) — 토크나이저 없이 한·영을
-같은 상태에 동시 학습 (614K params, 한국어 2.84 / 영어 3.41 bpc, 한·영 생성 확인).
+**🌏 한국어+영어 LM** — 한·영을 같은 상태에 동시 학습:
+- 바이트 단위(`stage22_bilingual.py`): 614K params, 토크나이저 없이(2.84/3.41 bpc) — 단어 조각 수준.
+- **유창성**(`stage23_bilingual_fluent.py`): ByteLevel BPE 서브워드 + 12M params로
+  **문장 수준 유창성**. 영어 Simple English Wikipedia로 깨끗한 산문(ppl 112),
+  한국어 자연스러운 문장(ppl 295). 에너지 코어 불변, 입력만 바이트→서브워드.
+  언어 태그(`<ko>`/`<en>`)로 코드스위칭 억제, `generate()` repetition_penalty 추가.
 
 ### 🖼️ Stage 5 (멀티모달 + 행동 슬롯)
 
