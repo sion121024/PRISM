@@ -56,10 +56,12 @@ def main():
             if "final_val_acc" not in v:
                 print(f"  {k}: {v}")
                 continue
-            print(f"  {k:6s} params={v.get('params'):>8}  "
-                  f"train={v.get('final_train_acc'):.3f}  "
-                  f"val={v.get('final_val_acc'):.3f}  "
-                  f"loss={v.get('final_val_loss'):.4f}")
+            def f(x, spec=".3f"):
+                return "None" if x is None else format(x, spec)
+            print(f"  {k:6s} params={v.get('params')}  "
+                  f"train={f(v.get('final_train_acc'))}  "
+                  f"val={f(v.get('final_val_acc'))}  "
+                  f"loss={f(v.get('final_val_loss'), '.4f')}")
 
     if "e3_thinking_depth" in ex:
         print("\n== E3 thinking depth ==")
@@ -67,7 +69,7 @@ def main():
             print(f"  eval {k:5s} acc={v['val_acc']:.3f} "
                   f"loss={v['val_loss']:.4f}")
         for k, v in ex["e3_thinking_depth"].get("train_K", {}).items():
-            if "final_val_acc" in v and v["final_val_acc"] is not None:
+            if v.get("final_val_acc") is not None:
                 print(f"  train {k:5s} train={v['final_train_acc']:.3f} "
                       f"val={v['final_val_acc']:.3f}  "
                       f"{fmt_stats(v.get('stats_val'))}")
