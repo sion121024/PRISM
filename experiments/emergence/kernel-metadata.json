@@ -1,0 +1,15 @@
+{
+  "id": "sion1210/prism-emergence",
+  "title": "prism-emergence",
+  "code_file": "kaggle_emergence.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
