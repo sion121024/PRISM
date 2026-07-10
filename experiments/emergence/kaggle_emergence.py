@@ -114,12 +114,21 @@ def hours_left() -> float:
 # --------------------------------------------------------------------------- #
 
 class PRISMCellX(nn.Module):
-    """Energy cell: E(x) = ½‖u−Dx‖²_Π1 + ½‖(I−M)x‖²_Π2 + ½λ‖x‖²."""
+    """Energy cell: E(x) = ½‖u−D·σ(x)‖²_Π1 + ½‖(I−M)x‖²_Π2 + ½λ‖x‖².
 
-    def __init__(self, d: int, lam: float = 0.01):
+    nonlinear=True uses σ=tanh (round-2 fix). With a purely quadratic E,
+    ∂E/∂x is linear in x, so the per-token state update is an affine map —
+    the model cannot represent nonlinear tasks like modular arithmetic
+    (round-1 result: transformer grokked, linear PRISM never even memorized).
+    A nonlinear dictionary keeps the energy-descent principle intact while
+    making x* a nonlinear function of the input.
+    """
+
+    def __init__(self, d: int, lam: float = 0.01, nonlinear: bool = True):
         super().__init__()
         self.d = d
         self.lam = lam
+        self.nonlinear = nonlinear
         self.D = nn.Linear(d, d, bias=False)
         self.log_pi1 = nn.Parameter(torch.zeros(d))
         self.log_pi2 = nn.Parameter(torch.zeros(d))
@@ -128,18 +137,23 @@ class PRISMCellX(nn.Module):
     def grad_E(self, x, u, M):
         pi1 = self.log_pi1.exp()
         pi2 = self.log_pi2.exp()
-        eps_in = u - x @ self.D.weight.T
+        h = torch.tanh(x) if self.nonlinear else x
+        eps_in = u - h @ self.D.weight.T
+        g_in = -(eps_in * pi1) @ self.D.weight
+        if self.nonlinear:
+            g_in = g_in * (1 - h ** 2)  # σ'(x) chain rule
         if M is None:
             d_mem = x  # M = 0  =>  eps_mem = x,  (I−Mᵀ)eps = x
         else:
             eps_mem = x - torch.einsum("bij,bj->bi", M, x)
             d_mem = eps_mem - torch.einsum("bji,bj->bi", M, eps_mem)
-        return (-(eps_in * pi1) @ self.D.weight + d_mem * pi2 + self.lam * x)
+        return g_in + d_mem * pi2 + self.lam * x
 
     def energy(self, x, u, M):
         pi1 = self.log_pi1.exp()
         pi2 = self.log_pi2.exp()
-        eps_in = u - x @ self.D.weight.T
+        h = torch.tanh(x) if self.nonlinear else x
+        eps_in = u - h @ self.D.weight.T
         eps_mem = x if M is None else x - torch.einsum("bij,bj->bi", M, x)
         return (0.5 * (eps_in ** 2 * pi1).sum(-1)
                 + 0.5 * (eps_mem ** 2 * pi2).sum(-1)
@@ -161,13 +175,13 @@ class PRISMSeq(nn.Module):
     def __init__(self, vocab: int, d: int, K: int = 8, step: float = 0.1,
                  momentum: float = 0.9, lam: float = 0.01,
                  fast_weights: bool = True, gamma: float = 0.05,
-                 eta_init: float = 0.1):
+                 eta_init: float = 0.1, nonlinear: bool = True):
         super().__init__()
         self.d, self.K, self.step, self.momentum = d, K, step, momentum
         self.fast_weights = fast_weights
         self.gamma = gamma
         self.embed = nn.Embedding(vocab, d)
-        self.cell = PRISMCellX(d, lam=lam)
+        self.cell = PRISMCellX(d, lam=lam, nonlinear=nonlinear)
         self.head = nn.Linear(d, vocab, bias=False)
         # learned memory-write strength (softplus > 0); its growth over
         # training is our "memory circuit formation" probe
@@ -404,31 +418,40 @@ def sc(x, smoke_x):
 P = sc(97, 13)
 GROK_STEPS = sc(60_000, 60)
 SWEEP_STEPS = sc(15_000, 40)
-RECALL_STEPS = sc(6_000, 40)
+RECALL_STEPS = sc(10_000, 40)
 EVAL_EVERY = sc(100, 10)
 D_MAIN = sc(128, 16)
 
 
-def preflight_fast_weights():
-    """Quick check: does PRISM learn mod arithmetic better with or without
-    the fast-weight memory? Picks the variant for all later runs."""
-    print("\n=== preflight: fast-weight on/off ===")
-    (tr, va, vocab) = None, None, None
+CFG = {"lr": 1e-3, "nonlinear": True}
+
+
+def preflight():
+    """Self-tuning: pick (nonlinear, lr) by short mod-23 memorization runs.
+    Round-1 showed linear PRISM cannot even memorize mod arithmetic; this
+    verifies the nonlinear fix on-device and picks a working lr."""
+    print("\n=== preflight: nonlinearity x lr grid ===")
     train, val, vocab = make_mod_dataset(sc(23, 13), "add", 0.7, seed=1)
-    out = {}
-    for fw in (True, False):
-        torch.manual_seed(7)
-        m = PRISMSeq(vocab, d=64, K=8, fast_weights=fw).to(DEVICE)
-        h = train_mod(m, train, val, max_steps=sc(1500, 30), wd=0.1,
-                      eval_every=sc(50, 10), tag=f"preflight fw={fw}",
-                      early_acc=1.01)  # no early stop
-        out[f"fw_{fw}"] = {"train_acc": h["train_acc"][-1],
-                           "val_acc": h["val_acc"][-1]}
+    out, best, best_acc = {}, None, -1.0
+    for nonlin in (True, False):
+        for lr in (1e-3, 3e-3, 1e-2):
+            torch.manual_seed(7)
+            m = PRISMSeq(vocab, d=64, K=8, nonlinear=nonlin).to(DEVICE)
+            h = train_mod(m, train, val, max_steps=sc(1500, 30), wd=0.1,
+                          lr=lr, eval_every=sc(50, 10),
+                          tag=f"preflight nl={nonlin} lr={lr}",
+                          early_acc=1.01)  # no early stop
+            key = f"nl_{nonlin}_lr_{lr}"
+            out[key] = {"train_acc": h["train_acc"][-1],
+                        "val_acc": h["val_acc"][-1]}
+            score = h["train_acc"][-1]
+            if score > best_acc:
+                best_acc, best = score, (nonlin, lr)
     RESULTS["experiments"]["preflight"] = out
     save_results()
-    use_fw = out["fw_True"]["train_acc"] >= out["fw_False"]["train_acc"]
-    print(f"preflight -> fast_weights={use_fw}  {out}")
-    return use_fw
+    CFG["nonlinear"], CFG["lr"] = best
+    print(f"preflight -> nonlinear={best[0]} lr={best[1]}  {out}")
+    return True  # fast weights always on (theory requires memory via M)
 
 
 def e1_grokking(use_fw: bool):
@@ -441,9 +464,10 @@ def e1_grokking(use_fw: bool):
             break
         train, val, vocab = make_mod_dataset(P, op, 0.5, seed=0)
         torch.manual_seed(42)
-        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=use_fw).to(DEVICE)
+        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=use_fw,
+                     nonlinear=CFG["nonlinear"]).to(DEVICE)
         h = train_mod(m, train, val, max_steps=GROK_STEPS, wd=1.0,
-                      eval_every=EVAL_EVERY, tag=f"E1 {op}")
+                      lr=CFG["lr"], eval_every=EVAL_EVERY, tag=f"E1 {op}")
         h["params"] = sum(p.numel() for p in m.parameters())
         h["stats_train"] = transition_stats(h["step"], h["train_acc"])
         h["stats_val"] = transition_stats(h["step"], h["val_acc"])
@@ -478,9 +502,10 @@ def e5_weight_decay(use_fw: bool):
             exp[f"wd_{wd}"] = {"skipped": "time budget"}
             continue
         torch.manual_seed(42)
-        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=use_fw).to(DEVICE)
+        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=use_fw,
+                     nonlinear=CFG["nonlinear"]).to(DEVICE)
         h = train_mod(m, train, val, max_steps=sc(30_000, 40), wd=wd,
-                      eval_every=EVAL_EVERY, tag=f"E5 wd={wd}")
+                      lr=CFG["lr"], eval_every=EVAL_EVERY, tag=f"E5 wd={wd}")
         h["stats_val"] = transition_stats(h["step"], h["val_acc"])
         exp[f"wd_{wd}"] = h
         RESULTS["experiments"]["e5_weight_decay"] = exp
@@ -498,9 +523,10 @@ def e2_scaling(use_fw: bool):
             exp[f"d_{d}"] = {"skipped": "time budget"}
             continue
         torch.manual_seed(42)
-        m = PRISMSeq(vocab, d=d, K=8, fast_weights=use_fw).to(DEVICE)
+        m = PRISMSeq(vocab, d=d, K=8, fast_weights=use_fw,
+                     nonlinear=CFG["nonlinear"]).to(DEVICE)
         h = train_mod(m, train, val, max_steps=SWEEP_STEPS, wd=1.0,
-                      eval_every=EVAL_EVERY, tag=f"E2 d={d}")
+                      lr=CFG["lr"], eval_every=EVAL_EVERY, tag=f"E2 d={d}")
         exp[f"d_{d}"] = {
             "params": sum(p.numel() for p in m.parameters()),
             "final_train_acc": h["train_acc"][-1] if h["train_acc"] else None,
@@ -524,7 +550,8 @@ def e3_thinking_depth(use_fw: bool):
 
     ckpt = os.path.join(OUT_DIR, "e1_add.pt")
     if os.path.exists(ckpt):
-        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=use_fw).to(DEVICE)
+        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=use_fw,
+                     nonlinear=CFG["nonlinear"]).to(DEVICE)
         m.load_state_dict(torch.load(ckpt, map_location=DEVICE))
         for K in sc([1, 2, 4, 8, 16, 32, 64], [1, 4, 8]):
             acc, loss = eval_last(m, xva, yva, K=K)
@@ -538,9 +565,10 @@ def e3_thinking_depth(use_fw: bool):
             exp["train_K"][f"K_{K}"] = {"skipped": "time budget"}
             continue
         torch.manual_seed(42)
-        m = PRISMSeq(vocab, d=D_MAIN, K=K, fast_weights=use_fw).to(DEVICE)
+        m = PRISMSeq(vocab, d=D_MAIN, K=K, fast_weights=use_fw,
+                     nonlinear=CFG["nonlinear"]).to(DEVICE)
         h = train_mod(m, train, val, max_steps=SWEEP_STEPS, wd=1.0,
-                      eval_every=EVAL_EVERY, tag=f"E3 trainK={K}")
+                      lr=CFG["lr"], eval_every=EVAL_EVERY, tag=f"E3 trainK={K}")
         exp["train_K"][f"K_{K}"] = {
             "final_train_acc": h["train_acc"][-1] if h["train_acc"] else None,
             "final_val_acc": h["val_acc"][-1] if h["val_acc"] else None,
@@ -562,8 +590,9 @@ def e4_memory(use_fw: bool):
             exp["curves"][f"pairs_{n_pairs}"] = {"skipped": "time budget"}
             continue
         torch.manual_seed(42)
-        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=True).to(DEVICE)
-        h = train_recall(m, vocab=vocab, n_pairs=n_pairs,
+        m = PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=True, eta_init=0.2,
+                     nonlinear=CFG["nonlinear"]).to(DEVICE)
+        h = train_recall(m, vocab=vocab, n_pairs=n_pairs, lr=1e-3,
                          max_steps=RECALL_STEPS, eval_every=EVAL_EVERY,
                          tag=f"E4 pairs={n_pairs}")
         h["stats_val"] = transition_stats(h["step"], h["val_acc"])
@@ -579,9 +608,10 @@ def e4_memory(use_fw: bool):
                 exp["capacity"][f"d{d}_p{n_pairs}"] = {"skipped": "time"}
                 continue
             torch.manual_seed(42)
-            m = PRISMSeq(vocab, d=d, K=8, fast_weights=True).to(DEVICE)
-            h = train_recall(m, vocab=vocab, n_pairs=n_pairs,
-                             max_steps=sc(3000, 20),
+            m = PRISMSeq(vocab, d=d, K=8, fast_weights=True, eta_init=0.2,
+                         nonlinear=CFG["nonlinear"]).to(DEVICE)
+            h = train_recall(m, vocab=vocab, n_pairs=n_pairs, lr=1e-3,
+                             max_steps=sc(5000, 20),
                              eval_every=sc(500, 10),
                              tag=f"E4cap d={d} p={n_pairs}")
             exp["capacity"][f"d{d}_p{n_pairs}"] = {
@@ -689,8 +719,9 @@ def make_plots():
 def main():
     print(f"PRISM emergence suite — smoke={SMOKE} device={DEVICE} "
           f"p={P} d={D_MAIN}")
-    use_fw = preflight_fast_weights()
+    use_fw = preflight()
     RESULTS["use_fast_weights"] = use_fw
+    RESULTS["config"] = dict(CFG)
 
     e1_grokking(use_fw)
     e4_memory(use_fw)          # memory axis early: unique PRISM claim

@@ -3,3 +3,4 @@ __pycache__/
 *.pyo
 data/
 experiments/emergence/out/
+experiments/emergence/kaggle_out/
