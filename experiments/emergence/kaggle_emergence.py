@@ -37,7 +37,7 @@ import time
 SMOKE = "--smoke" in sys.argv
 OUT_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "./out"
 os.makedirs(OUT_DIR, exist_ok=True)
-MAX_HOURS = 8.0
+MAX_HOURS = 6.0
 T_START = time.time()
 
 
@@ -335,8 +335,12 @@ def eval_last(model, x, y, K=None, batch: int = 4096):
 
 
 def train_mod(model, train, val, *, max_steps, lr=1e-3, wd=1.0, batch=512,
-              eval_every=100, tag="", early_acc=0.999, patience=3):
-    """Full history of train/val acc+loss — the grokking curve."""
+              eval_every=100, tag="", early_acc=0.999, patience=3,
+              K_sample=None):
+    """Full history of train/val acc+loss — the grokking curve.
+    K_sample=(lo,hi): sample thinking depth uniformly per step — forces
+    K-invariant (equilibrium-like) solutions instead of a fixed-depth
+    circuit (round-3 finding: fixed-K training works ONLY at that K)."""
     xtr, ytr = (t.to(DEVICE) for t in train)
     xva, yva = (t.to(DEVICE) for t in val)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd,
@@ -348,7 +352,9 @@ def train_mod(model, train, val, *, max_steps, lr=1e-3, wd=1.0, batch=512,
     for step_i in range(1, max_steps + 1):
         model.train()
         idx = torch.randint(0, n, (min(batch, n),), device=DEVICE)
-        logits = model(xtr[idx])[:, -1]
+        K_t = (int(torch.randint(K_sample[0], K_sample[1] + 1, (1,)).item())
+               if K_sample else None)
+        logits = model(xtr[idx], K=K_t)[:, -1]
         loss = F.cross_entropy(logits, ytr[idx])
         if not torch.isfinite(loss):
             print(f"[{tag}] DIVERGED at step {step_i}")
@@ -575,14 +581,15 @@ def e5_weight_decay(use_fw: bool):
     print("\n=== E5: weight-decay axis ===")
     exp = {}
     train, val, vocab = make_mod_dataset(P, "add", 0.5, seed=0)
-    for wd in [0.0, 0.1, 1.0]:
-        if hours_left() < 1.2:
+    d5 = sc(256, 16)
+    for wd in [0.0, 1.0]:
+        if hours_left() < 1.0:
             exp[f"wd_{wd}"] = {"skipped": "time budget"}
             continue
         m, h, _ = train_mod_retry(
-            lambda: PRISMSeq(vocab, d=D_MAIN, K=8, fast_weights=use_fw,
+            lambda: PRISMSeq(vocab, d=d5, K=8, fast_weights=use_fw,
                              nonlinear=CFG["nonlinear"]).to(DEVICE),
-            train, val, max_steps=sc(20_000, 40), wd=wd, lr=lr_for(D_MAIN),
+            train, val, max_steps=sc(20_000, 40), wd=wd, lr=lr_for(d5),
             eval_every=EVAL_EVERY, tag=f"E5 wd={wd}")
         h["stats_val"] = transition_stats(h["step"], h["val_acc"])
         exp[f"wd_{wd}"] = h
@@ -596,14 +603,14 @@ def e2_scaling(use_fw: bool):
     print("\n=== E2: scaling (width d) ===")
     exp = {}
     train, val, vocab = make_mod_dataset(P, "add", 0.5, seed=0)
-    for d in sc([8, 16, 32, 64, 128, 256, 512], [8, 16]):
+    for d in sc([32, 64, 128, 256, 512], [8, 16]):
         if hours_left() < 0.8:
             exp[f"d_{d}"] = {"skipped": "time budget"}
             continue
         m, h, _ = train_mod_retry(
             lambda d=d: PRISMSeq(vocab, d=d, K=8, fast_weights=use_fw,
                                  nonlinear=CFG["nonlinear"]).to(DEVICE),
-            train, val, max_steps=SWEEP_STEPS, wd=1.0, lr=lr_for(d),
+            train, val, max_steps=sc(30_000, 40), wd=1.0, lr=lr_for(d),
             eval_every=EVAL_EVERY, tag=f"E2 d={d}")
         exp[f"d_{d}"] = {
             "params": sum(p.numel() for p in m.parameters()),
@@ -626,8 +633,11 @@ def e3_thinking_depth(use_fw: bool):
     train, val, vocab = make_mod_dataset(P, "add", 0.5, seed=0)
     xva, yva = (t.to(DEVICE) for t in val)
 
-    ckpt = os.path.join(OUT_DIR, "e1_add.pt")
-    if os.path.exists(ckpt):
+    ckpt = next((p for p in
+                 [os.path.join(OUT_DIR, "e1_add.pt"),
+                  os.path.join(OUT_DIR, "e6_krandom.pt")]
+                 if os.path.exists(p)), None)
+    if ckpt:
         m = PRISMSeq(vocab, d=sc(512, 16), K=8, fast_weights=use_fw,
                      nonlinear=CFG["nonlinear"]).to(DEVICE)
         m.load_state_dict(torch.load(ckpt, map_location=DEVICE))
@@ -638,14 +648,15 @@ def e3_thinking_depth(use_fw: bool):
     RESULTS["experiments"]["e3_thinking_depth"] = exp
     save_results()
 
-    for K in sc([1, 2, 4, 8, 16], [1, 8]):
+    d3 = sc(256, 16)
+    for K in sc([2, 4, 8, 16], [1, 8]):
         if hours_left() < 0.5:
             exp["train_K"][f"K_{K}"] = {"skipped": "time budget"}
             continue
         m, h, _ = train_mod_retry(
-            lambda K=K: PRISMSeq(vocab, d=D_MAIN, K=K, fast_weights=use_fw,
+            lambda K=K: PRISMSeq(vocab, d=d3, K=K, fast_weights=use_fw,
                                  nonlinear=CFG["nonlinear"]).to(DEVICE),
-            train, val, max_steps=SWEEP_STEPS, wd=1.0, lr=lr_for(D_MAIN),
+            train, val, max_steps=sc(20_000, 40), wd=1.0, lr=lr_for(d3),
             eval_every=EVAL_EVERY, tag=f"E3 trainK={K}")
         exp["train_K"][f"K_{K}"] = {
             "final_train_acc": h["train_acc"][-1] if h["train_acc"] else None,
@@ -655,6 +666,36 @@ def e3_thinking_depth(use_fw: bool):
         }
         RESULTS["experiments"]["e3_thinking_depth"] = exp
         save_results()
+    return exp
+
+
+def e6_k_random(use_fw: bool):
+    """Train with K ~ U{4..16} per step, then sweep eval-K. If the model
+    generalizes across K (and improves with more K), 'thinking longer'
+    becomes a real, usable axis — the round-3 fixed-K model collapsed
+    to a K=8-only circuit."""
+    print("\n=== E6: K-randomized training (anytime thinking) ===")
+    exp = {}
+    train, val, vocab = make_mod_dataset(P, "add", 0.5, seed=0)
+    d6 = sc(512, 16)
+    torch.manual_seed(42)
+    m = PRISMSeq(vocab, d=d6, K=8, fast_weights=use_fw,
+                 nonlinear=CFG["nonlinear"]).to(DEVICE)
+    h = train_mod(m, train, val, max_steps=sc(35_000, 40), wd=1.0,
+                  lr=lr_for(d6), eval_every=EVAL_EVERY,
+                  tag="E6 K~U(4,16)", K_sample=(4, 16))
+    h["stats_val"] = transition_stats(h["step"], h["val_acc"])
+    exp["train"] = h
+    torch.save(m.state_dict(), os.path.join(OUT_DIR, "e6_krandom.pt"))
+
+    xva, yva = (t.to(DEVICE) for t in val)
+    exp["eval_K"] = {}
+    for K in sc([1, 2, 4, 6, 8, 12, 16, 24, 32, 64], [1, 4, 8]):
+        acc, loss = eval_last(m, xva, yva, K=K)
+        exp["eval_K"][f"K_{K}"] = {"val_acc": acc, "val_loss": loss}
+        print(f"[E6 evalK] K={K:3d}  val_acc={acc:.3f}  loss={loss:.4f}")
+    RESULTS["experiments"]["e6_k_random"] = exp
+    save_results()
     return exp
 
 
@@ -798,14 +839,17 @@ def main():
     print(f"PRISM emergence suite — smoke={SMOKE} device={DEVICE} "
           f"p={P} d={D_MAIN}")
     fastweights_selftest()
-    use_fw = preflight()
+    # round-4: config fixed from round-2/3 preflights (nonlinear, lr=1e-2
+    # at d=64 before width scaling). E1 grokking + E4 memory already
+    # demonstrated in round 3 — this round targets the missing axes.
+    CFG["nonlinear"], CFG["lr"] = True, 1e-2
+    use_fw = True
     RESULTS["use_fast_weights"] = use_fw
     RESULTS["config"] = dict(CFG)
 
-    e1_grokking(use_fw)
-    e4_memory(use_fw)          # memory axis early: unique PRISM claim
-    e2_scaling(use_fw)
-    e3_thinking_depth(use_fw)
+    e2_scaling(use_fw)         # emergence over scale (critical width)
+    e6_k_random(use_fw)        # anytime thinking via K-randomized training
+    e3_thinking_depth(use_fw)  # trainK sweep + eval-K on e6 ckpt
     e5_weight_decay(use_fw)
 
     make_plots()
