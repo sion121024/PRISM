@@ -37,7 +37,7 @@ import time
 SMOKE = "--smoke" in sys.argv
 OUT_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "./out"
 os.makedirs(OUT_DIR, exist_ok=True)
-MAX_HOURS = 6.0
+MAX_HOURS = 2.3
 T_START = time.time()
 
 
@@ -495,13 +495,13 @@ def lr_for(d: int) -> float:
 
 
 def train_mod_retry(build, train, val, *, max_steps, wd, lr, eval_every,
-                    tag, retries=2):
+                    tag, retries=2, **kw):
     """Divergence-safe training: halve lr and rebuild on NaN, up to N times."""
     for i in range(retries + 1):
         torch.manual_seed(42)
         m = build()
         h = train_mod(m, train, val, max_steps=max_steps, wd=wd, lr=lr,
-                      eval_every=eval_every, tag=f"{tag} lr={lr:.2e}")
+                      eval_every=eval_every, tag=f"{tag} lr={lr:.2e}", **kw)
         if "diverged_at" not in h:
             return m, h, lr
         print(f"[{tag}] diverged -> retry with lr {lr/2:.2e}")
@@ -669,6 +669,35 @@ def e3_thinking_depth(use_fw: bool):
     return exp
 
 
+def e7_k_threshold(use_fw: bool):
+    """Round-4 star result: at d=256/20k steps, K=8 fails but K=16 fully
+    groks (val 96.9%). Map the emergence-over-thinking-depth curve finely."""
+    print("\n=== E7: K threshold (emergence over thinking depth) ===")
+    exp = {}
+    train, val, vocab = make_mod_dataset(P, "add", 0.5, seed=0)
+    d7 = sc(256, 16)
+    for K in sc([8, 10, 12, 14, 16, 20], [2, 8]):
+        if hours_left() < 0.35:
+            exp[f"K_{K}"] = {"skipped": "time budget"}
+            continue
+        m, h, _ = train_mod_retry(
+            lambda K=K: PRISMSeq(vocab, d=d7, K=K, fast_weights=use_fw,
+                                 nonlinear=CFG["nonlinear"]).to(DEVICE),
+            train, val, max_steps=sc(15_000, 40), wd=1.0, lr=lr_for(d7),
+            eval_every=EVAL_EVERY, tag=f"E7 K={K}")
+        exp[f"K_{K}"] = {
+            "final_train_acc": h["train_acc"][-1] if h["train_acc"] else None,
+            "final_val_acc": h["val_acc"][-1] if h["val_acc"] else None,
+            "final_val_loss": h["val_loss"][-1] if h["val_loss"] else None,
+            "stats_val": transition_stats(h["step"], h["val_acc"]),
+            "curve_step": h["step"], "curve_val_acc": h["val_acc"],
+            "curve_train_acc": h["train_acc"],
+        }
+        RESULTS["experiments"]["e7_k_threshold"] = exp
+        save_results()
+    return exp
+
+
 def e6_k_random(use_fw: bool):
     """Train with K ~ U{4..16} per step, then sweep eval-K. If the model
     generalizes across K (and improves with more K), 'thinking longer'
@@ -677,13 +706,12 @@ def e6_k_random(use_fw: bool):
     print("\n=== E6: K-randomized training (anytime thinking) ===")
     exp = {}
     train, val, vocab = make_mod_dataset(P, "add", 0.5, seed=0)
-    d6 = sc(512, 16)
-    torch.manual_seed(42)
-    m = PRISMSeq(vocab, d=d6, K=8, fast_weights=use_fw,
-                 nonlinear=CFG["nonlinear"]).to(DEVICE)
-    h = train_mod(m, train, val, max_steps=sc(35_000, 40), wd=1.0,
-                  lr=lr_for(d6), eval_every=EVAL_EVERY,
-                  tag="E6 K~U(4,16)", K_sample=(4, 16))
+    d6 = sc(256, 16)
+    m, h, _ = train_mod_retry(
+        lambda: PRISMSeq(vocab, d=d6, K=12, fast_weights=use_fw,
+                         nonlinear=CFG["nonlinear"]).to(DEVICE),
+        train, val, max_steps=sc(25_000, 40), wd=1.0, lr=lr_for(d6),
+        eval_every=EVAL_EVERY, tag="E6 K~U(4,20)", K_sample=(4, 20))
     h["stats_val"] = transition_stats(h["step"], h["val_acc"])
     exp["train"] = h
     torch.save(m.state_dict(), os.path.join(OUT_DIR, "e6_krandom.pt"))
@@ -847,10 +875,10 @@ def main():
     RESULTS["use_fast_weights"] = use_fw
     RESULTS["config"] = dict(CFG)
 
-    e2_scaling(use_fw)         # emergence over scale (critical width)
-    e6_k_random(use_fw)        # anytime thinking via K-randomized training
-    e3_thinking_depth(use_fw)  # trainK sweep + eval-K on e6 ckpt
-    e5_weight_decay(use_fw)
+    # round-5: round-4 found the critical axis is thinking depth K, not
+    # width (K=16/d=256 grokked in 13.5k steps; K=8 failed at ALL widths).
+    e7_k_threshold(use_fw)     # fine emergence-over-K curve (the money plot)
+    e6_k_random(use_fw)        # anytime thinking, retry-safe, d=256
 
     make_plots()
     save_results()
